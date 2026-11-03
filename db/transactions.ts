@@ -341,19 +341,44 @@ export async function getMonthlyExpensesStatement(monthISO: string): Promise<Tra
         });
       }
     } else if (expType === 'PERSONALIZAR') {
-      // Início e Término por nome do mês
-      const startIdx = exp.start_month ? (MONTH_NAMES_LIST as readonly string[]).indexOf(exp.start_month) + 1 : 1;
-      const endIdx = exp.end_month ? (MONTH_NAMES_LIST as readonly string[]).indexOf(exp.end_month) + 1 : 12;
+      // Início e Término (suporta YYYY-MM, Mês/AAAA ou nome legado do mês)
+      const parseMonthISO = (val?: string | null): string | null => {
+        if (!val) return null;
+        if (/^\d{4}-\d{2}$/.test(val)) return val;
+        if (val.includes('/')) {
+          const [mPart, yPart] = val.split('/');
+          const mIdx = (MONTH_NAMES_LIST as readonly string[]).indexOf(mPart) + 1;
+          const yNum = parseInt(yPart, 10);
+          if (mIdx > 0 && !isNaN(yNum)) {
+            return `${yNum}-${String(mIdx).padStart(2, '0')}`;
+          }
+        }
+        return null;
+      };
+
+      const startISO = parseMonthISO(exp.start_month);
+      const endISO = parseMonthISO(exp.end_month);
 
       let inRange = false;
-      if (startIdx <= endIdx) {
-        inRange = selectedMonthNum >= startIdx && selectedMonthNum <= endIdx;
+      if (startISO && endISO) {
+        inRange = monthISO >= startISO && monthISO <= endISO;
       } else {
-        // Virada de ano (ex: Nov a Fev)
-        inRange = selectedMonthNum >= startIdx || selectedMonthNum <= endIdx;
+        // Fallback para compatibilidade com nomes de meses simples
+        const startIdx = exp.start_month ? (MONTH_NAMES_LIST as readonly string[]).indexOf(exp.start_month) + 1 : 1;
+        const endIdx = exp.end_month ? (MONTH_NAMES_LIST as readonly string[]).indexOf(exp.end_month) + 1 : 12;
+
+        if (startIdx <= endIdx) {
+          inRange = selectedMonthNum >= startIdx && selectedMonthNum <= endIdx;
+        } else {
+          // Virada de ano (ex: Nov a Fev)
+          inRange = selectedMonthNum >= startIdx || selectedMonthNum <= endIdx;
+        }
+        if (inRange && selectedYear < expYear) {
+          inRange = false;
+        }
       }
 
-      if (inRange && selectedYear >= expYear) {
+      if (inRange) {
         const itemDate = `${monthISO}-${String(expDay).padStart(2, '0')}`;
         results.push({
           ...exp,

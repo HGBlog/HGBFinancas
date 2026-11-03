@@ -23,6 +23,7 @@ import {
   updateTransaction,
 } from '@/db/transactions';
 import { getOrCreatePayee } from '@/db/payees';
+import { CalendarPickerModal } from '@/components/CalendarPickerModal';
 import {
   formatCurrency,
   formatDateBR,
@@ -48,6 +49,7 @@ export default function IncomeScreen() {
   const [editTitle, setEditTitle] = useState('');
   const [editAmountDigits, setEditAmountDigits] = useState('');
   const [editDateBR, setEditDateBR] = useState('');
+  const [calendarPickerVisible, setCalendarPickerVisible] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -334,24 +336,30 @@ export default function IncomeScreen() {
               }}
             />
 
-            {/* Campo Data DD-MM-AAAA */}
+            {/* Campo Data DD-MM-AAAA com máscara de calendário */}
             <Text style={[styles.inputLabel, { color: theme.subtext, marginTop: 12 }]}>
               Data (DD-MM-AAAA)
             </Text>
-            <TextInput
+            <TouchableOpacity
               style={[
                 styles.modalInput,
-                { color: theme.text, borderColor: theme.border, backgroundColor: theme.background },
+                styles.datePickerBtn,
+                { borderColor: theme.border, backgroundColor: theme.background },
               ]}
-              keyboardType="numeric"
-              placeholder="DD-MM-AAAA"
-              placeholderTextColor={theme.subtext}
-              maxLength={10}
-              value={editDateBR}
-              onChangeText={(text) => {
-                const masked = formatDateInput(text);
-                setEditDateBR(masked);
-              }}
+              onPress={() => setCalendarPickerVisible(true)}
+              activeOpacity={0.7}
+            >
+              <Text style={{ color: editDateBR ? theme.text : theme.subtext, fontSize: 15 }}>
+                {editDateBR || 'DD-MM-AAAA'}
+              </Text>
+              <Ionicons name="calendar-outline" size={18} color={theme.tint} />
+            </TouchableOpacity>
+
+            <CalendarPickerModal
+              visible={calendarPickerVisible}
+              initialDateBR={editDateBR}
+              onSelect={(d) => setEditDateBR(d)}
+              onClose={() => setCalendarPickerVisible(false)}
             />
 
             <RNView style={styles.modalButtonsRow}>
@@ -558,6 +566,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     fontSize: 16,
+  },
+  datePickerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   modalButtonsRow: {
     flexDirection: 'row',

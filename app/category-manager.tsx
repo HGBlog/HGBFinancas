@@ -73,7 +73,12 @@ export default function CategoryManagerScreen() {
     setEditingCategory(null);
     setName('');
     setParentId(pId);
-    setSelectedColor(AVAILABLE_COLORS[0]);
+    if (pId) {
+      const parentGroup = categories.find((c) => c.id === pId);
+      setSelectedColor(parentGroup?.color || AVAILABLE_COLORS[0]);
+    } else {
+      setSelectedColor(AVAILABLE_COLORS[0]);
+    }
     setSelectedIcon('folder');
     setModalVisible(true);
   };
@@ -82,36 +87,62 @@ export default function CategoryManagerScreen() {
     setEditingCategory(cat);
     setName(cat.name);
     setParentId(cat.parent_id || null);
-    setSelectedColor(cat.color || AVAILABLE_COLORS[0]);
+    if (cat.parent_id) {
+      const parentGroup = categories.find((c) => c.id === cat.parent_id);
+      setSelectedColor(parentGroup?.color || cat.color || AVAILABLE_COLORS[0]);
+    } else {
+      setSelectedColor(cat.color || AVAILABLE_COLORS[0]);
+    }
     setSelectedIcon((cat.icon as any) || 'folder');
     setModalVisible(true);
   };
 
   const handleSave = async () => {
-    if (!name.trim()) {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
       Alert.alert('Campo Obrigatório', 'Por favor, informe o nome da categoria.');
       return;
     }
 
+    // Validação contra grupos duplicados (Não pode haver grupos duplicados)
+    if (!parentId) {
+      const isDuplicate = parentCategories.some((p) => {
+        if (editingCategory && p.id === editingCategory.id) return false;
+        return p.name.trim().toLowerCase() === trimmedName.toLowerCase();
+      });
+
+      if (isDuplicate) {
+        Alert.alert(
+          'Grupo duplicado',
+          `Já existe um grupo principal cadastrado com o nome "${trimmedName}". Não é permitido cadastrar grupos duplicados.`
+        );
+        return;
+      }
+    }
+
     try {
+      const parentGroup = parentId ? categories.find((c) => c.id === parentId) : null;
+      // Cor do subgrupo obrigatoriamente segue a cor do grupo
+      const finalColor = parentGroup ? parentGroup.color : selectedColor;
+
       if (editingCategory) {
-        // Alterar categoria existente
+        // Alterar categoria ou subcategoria existente (inclui ícone)
         await updateCategory(editingCategory.id, {
-          name: name.trim(),
-          color: selectedColor,
+          name: trimmedName,
+          color: finalColor,
           icon: selectedIcon,
         });
-        Alert.alert('Sucesso', 'Categoria alterada com sucesso!');
+        Alert.alert('Sucesso', 'Alteração salva com sucesso!');
       } else {
-        // Cadastrar nova categoria
+        // Cadastrar nova categoria ou subcategoria (inclui ícone)
         await createCategory({
-          name: name.trim(),
+          name: trimmedName,
           parent_id: parentId,
           type: activeTab,
-          color: selectedColor,
+          color: finalColor,
           icon: selectedIcon,
         });
-        Alert.alert('Sucesso', 'Nova categoria cadastrada com sucesso!');
+        Alert.alert('Sucesso', 'Cadastro realizado com sucesso!');
       }
 
       setModalVisible(false);
@@ -142,9 +173,30 @@ export default function CategoryManagerScreen() {
     );
   };
 
-  // Agrupar categorias principais e subcategorias
-  const parentCategories = categories.filter((c) => !c.parent_id);
-  const getSubcategories = (pId: number) => categories.filter((c) => c.parent_id === pId);
+  // Agrupar categorias principais evitando duplicações visuais
+  const rawParentCategories = categories.filter((c) => !c.parent_id);
+  const seenParentNames = new Set<string>();
+  const parentCategories: Category[] = [];
+  const duplicateParentIdsMap = new Map<number, number>();
+
+  for (const p of rawParentCategories) {
+    const key = p.name.trim().toLowerCase();
+    if (!seenParentNames.has(key)) {
+      seenParentNames.add(key);
+      parentCategories.push(p);
+    } else {
+      const primary = parentCategories.find((x) => x.name.trim().toLowerCase() === key);
+      if (primary) {
+        duplicateParentIdsMap.set(p.id, primary.id);
+      }
+    }
+  }
+
+  const getSubcategories = (pId: number) => {
+    return categories.filter(
+      (c) => c.parent_id === pId || (c.parent_id && duplicateParentIdsMap.get(c.parent_id) === pId)
+    );
+  };
 
   return (
     <View style={[styles.container, { backgroundColor: theme.background }]}>
@@ -275,8 +327,9 @@ export default function CategoryManagerScreen() {
                         <Ionicons name="return-down-forward" size={16} color={theme.subtext} />
                       </RNView>
 
-                      <RNView style={[styles.subIcon, { backgroundColor: sub.color + '20' }]}>
-                        <Ionicons name={(sub.icon as any) || 'folder'} size={14} color={sub.color} />
+                      {/* Ícone do subgrupo segue o mesmo padrão de cor do grupo */}
+                      <RNView style={[styles.subIcon, { backgroundColor: parent.color + '20' }]}>
+                        <Ionicons name={(sub.icon as any) || 'folder'} size={14} color={parent.color} />
                       </RNView>
 
                       <Text style={styles.subName}>{sub.name}</Text>
@@ -336,10 +389,10 @@ export default function CategoryManagerScreen() {
               onChangeText={setName}
             />
 
-            {!parentId && (
+            {!parentId ? (
               <>
                 <Text style={[styles.inputLabel, { color: theme.subtext, marginTop: 14 }]}>
-                  Cor
+                  Cor do Grupo
                 </Text>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.colorsScroll}>
                   {AVAILABLE_COLORS.map((col) => (
@@ -354,31 +407,50 @@ export default function CategoryManagerScreen() {
                     />
                   ))}
                 </ScrollView>
-
-                <Text style={[styles.inputLabel, { color: theme.subtext, marginTop: 14 }]}>
-                  Ícone
-                </Text>
-                <RNView style={styles.iconsGrid}>
-                  {AVAILABLE_ICONS.slice(0, 16).map((ic) => (
-                    <TouchableOpacity
-                      key={ic}
-                      style={[
-                        styles.iconBox,
-                        { borderColor: theme.border },
-                        selectedIcon === ic && { backgroundColor: theme.tint, borderColor: theme.tint },
-                      ]}
-                      onPress={() => setSelectedIcon(ic)}
-                    >
-                      <Ionicons
-                        name={ic}
-                        size={20}
-                        color={selectedIcon === ic ? '#FFF' : theme.text}
-                      />
-                    </TouchableOpacity>
-                  ))}
-                </RNView>
               </>
+            ) : (
+              <RNView
+                style={[
+                  styles.colorInheritNotice,
+                  { backgroundColor: selectedColor + '18', borderColor: selectedColor + '40' },
+                ]}
+              >
+                <RNView style={[styles.colorPreviewDot, { backgroundColor: selectedColor }]} />
+                <Text style={[styles.colorInheritText, { color: theme.text }]}>
+                  Cor herdada do grupo:{' '}
+                  <Text style={{ fontWeight: '700', color: selectedColor }}>
+                    {categories.find((c) => c.id === parentId)?.name || 'Grupo'}
+                  </Text>
+                </Text>
+              </RNView>
             )}
+
+            {/* Cadastro e alteração de ícone disponível para GRUPO e SUBGRUPO */}
+            <Text style={[styles.inputLabel, { color: theme.subtext, marginTop: 14 }]}>
+              Ícone {parentId ? 'do Subgrupo' : 'do Grupo'}
+            </Text>
+            <RNView style={styles.iconsGrid}>
+              {AVAILABLE_ICONS.slice(0, 16).map((ic) => (
+                <TouchableOpacity
+                  key={ic}
+                  style={[
+                    styles.iconBox,
+                    { borderColor: theme.border },
+                    selectedIcon === ic && {
+                      backgroundColor: selectedColor,
+                      borderColor: selectedColor,
+                    },
+                  ]}
+                  onPress={() => setSelectedIcon(ic)}
+                >
+                  <Ionicons
+                    name={ic}
+                    size={20}
+                    color={selectedIcon === ic ? '#FFF' : selectedColor}
+                  />
+                </TouchableOpacity>
+              ))}
+            </RNView>
 
             <RNView style={styles.modalBtnsRow}>
               <TouchableOpacity
@@ -559,6 +631,24 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 8,
     marginBottom: 16,
+  },
+  colorInheritNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    marginTop: 10,
+    marginBottom: 6,
+    gap: 8,
+  },
+  colorPreviewDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+  },
+  colorInheritText: {
+    fontSize: 13,
   },
   iconBox: {
     width: 40,

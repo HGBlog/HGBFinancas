@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   StyleSheet,
   ScrollView,
@@ -7,6 +7,7 @@ import {
   View as RNView,
   Alert,
   Modal,
+  Switch,
 } from 'react-native';
 import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -20,6 +21,8 @@ import { getCategories } from '@/db/categories';
 import { getPayees, getOrCreatePayee } from '@/db/payees';
 import { createTransaction } from '@/db/transactions';
 import { scheduleExpenseReminderNotifications } from '@/services/notificationService';
+import { CalendarPickerModal } from '@/components/CalendarPickerModal';
+import { MonthYearPickerModal } from '@/components/MonthYearPickerModal';
 import {
   formatCurrency,
   formatCurrencyInput,
@@ -84,16 +87,45 @@ export default function NewTransactionScreen() {
   // -------------------------------------------------------------
   // ESTADOS PARA DESPESA
   // -------------------------------------------------------------
+  const now = new Date();
+  const currentMonthNum = now.getMonth() + 1;
+  const currentYearNum = now.getFullYear();
+
   const [expenseName, setExpenseName] = useState('');
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null);
   const [expenseAmountDigits, setExpenseAmountDigits] = useState('');
   const [expenseType, setExpenseType] = useState<ExpenseRecurrenceType>('UNICO');
-  const [startMonth, setStartMonth] = useState<string>('Janeiro');
-  const [endMonth, setEndMonth] = useState<string>('Dezembro');
+
+  // Mês e Ano de Início e Término para Personalizar
+  const [startMonthNum, setStartMonthNum] = useState<number>(currentMonthNum);
+  const [startYearNum, setStartYearNum] = useState<number>(currentYearNum);
+  const [startMonthFormatted, setStartMonthFormatted] = useState<string>(
+    `${MONTH_NAMES_LIST[currentMonthNum - 1]}/${currentYearNum}`
+  );
+  const [startMonthISO, setStartMonthISO] = useState<string>(
+    `${currentYearNum}-${String(currentMonthNum).padStart(2, '0')}`
+  );
+
+  const [endMonthNum, setEndMonthNum] = useState<number>(12);
+  const [endYearNum, setEndYearNum] = useState<number>(currentYearNum);
+  const [endMonthFormatted, setEndMonthFormatted] = useState<string>(
+    `Dezembro/${currentYearNum}`
+  );
+  const [endMonthISO, setEndMonthISO] = useState<string>(
+    `${currentYearNum}-12`
+  );
+
   const [monthModalTarget, setMonthModalTarget] = useState<'START' | 'END' | null>(null);
 
   const [expenseDateBR, setExpenseDateBR] = useState(getTodayBR());
   const [expenseNotes, setExpenseNotes] = useState('');
+
+  // Modais de Calendário
+  const [expenseCalendarVisible, setExpenseCalendarVisible] = useState(false);
+  const [incomeCalendarVisible, setIncomeCalendarVisible] = useState(false);
+
+  // Switch de Desconto CB Mensal (10%)
+  const [applyCbDiscount, setApplyCbDiscount] = useState<boolean>(true);
 
   // -------------------------------------------------------------
   // ESTADOS PARA RECEITA
@@ -246,8 +278,8 @@ export default function NewTransactionScreen() {
           status: 'UNCLEARED', // Despesa acumulativa até ser paga
           notes: finalExpenseDescription,
           expense_type: expenseType,
-          start_month: expenseType === 'PERSONALIZAR' ? startMonth : null,
-          end_month: expenseType === 'PERSONALIZAR' ? endMonth : null,
+          start_month: expenseType === 'PERSONALIZAR' ? startMonthISO : null,
+          end_month: expenseType === 'PERSONALIZAR' ? endMonthISO : null,
           due_day: dueDay,
         });
 
@@ -326,9 +358,11 @@ export default function NewTransactionScreen() {
           notes: notesSummary,
         });
 
-        // 2. Criar automaticamente a nova despesa única de 10% do CB Mensal
+        // 2. Se a opção de Desconto de CB Mensal estiver LIGADA, criar a despesa
         const discountAmount = Math.round(finalAmount * 0.1 * 100) / 100;
-        if (discountAmount > 0) {
+        let createdDiscount = false;
+
+        if (applyCbDiscount && discountAmount > 0) {
           const expenseTitle = `CB Mensal - ${receiptType}`;
           const cbPayeeId = await getOrCreatePayee(expenseTitle);
 
@@ -340,16 +374,19 @@ export default function NewTransactionScreen() {
             expense_type: 'UNICO',
             date: isoDate,
             status: 'UNCLEARED',
-            notes: `Desconto automático de 10% referente ao CB Mensal da receita (${receiptType})`,
+            notes: `Desconto de 10% referente ao CB Mensal da receita (${receiptType})`,
           });
           scheduleExpenseReminderNotifications().catch(() => {});
+          createdDiscount = true;
         }
 
-        Alert.alert(
-          'Sucesso',
-          `Receita de ${formatCurrency(finalAmount)} registrada com sucesso!\n\nFoi gerada automaticamente a despesa "CB Mensal - ${receiptType}" de ${formatCurrency(discountAmount)}.`,
-          [{ text: 'OK', onPress: () => router.back() }]
-        );
+        const successMessage = createdDiscount
+          ? `Receita de ${formatCurrency(finalAmount)} registrada com sucesso!\n\nFoi gerada automaticamente a despesa "CB Mensal - ${receiptType}" de ${formatCurrency(discountAmount)}.`
+          : `Receita de ${formatCurrency(finalAmount)} registrada com sucesso!`;
+
+        Alert.alert('Sucesso', successMessage, [
+          { text: 'OK', onPress: () => router.back() },
+        ]);
       } catch (err) {
         console.error('Erro ao salvar receita:', err);
         Alert.alert('Erro', 'Não foi possível cadastrar a receita.');
@@ -559,13 +596,13 @@ export default function NewTransactionScreen() {
             {expenseType === 'PERSONALIZAR' && (
               <RNView style={[styles.personalizarBox, { borderTopColor: theme.border }]}>
                 <Text style={[styles.personalizarHeading, { color: theme.text }]}>
-                  Período da Despesa Personalizada:
+                  Período da Despesa Personalizada (Mês e Ano):
                 </Text>
 
                 <RNView style={styles.startEndRow}>
                   {/* Campo Início */}
                   <RNView style={styles.pickerCol}>
-                    <Text style={[styles.smallLabel, { color: theme.subtext }]}>Início</Text>
+                    <Text style={[styles.smallLabel, { color: theme.subtext }]}>Início (Mês/Ano)</Text>
                     <TouchableOpacity
                       style={[
                         styles.selectButton,
@@ -575,7 +612,7 @@ export default function NewTransactionScreen() {
                     >
                       <Ionicons name="calendar-outline" size={16} color={theme.tint} />
                       <Text style={[styles.selectButtonText, { color: theme.text }]}>
-                        {startMonth}
+                        {startMonthFormatted}
                       </Text>
                       <Ionicons name="chevron-down" size={16} color={theme.subtext} />
                     </TouchableOpacity>
@@ -583,7 +620,7 @@ export default function NewTransactionScreen() {
 
                   {/* Campo Término */}
                   <RNView style={styles.pickerCol}>
-                    <Text style={[styles.smallLabel, { color: theme.subtext }]}>Término</Text>
+                    <Text style={[styles.smallLabel, { color: theme.subtext }]}>Término (Mês/Ano)</Text>
                     <TouchableOpacity
                       style={[
                         styles.selectButton,
@@ -593,7 +630,7 @@ export default function NewTransactionScreen() {
                     >
                       <Ionicons name="calendar-outline" size={16} color={theme.tint} />
                       <Text style={[styles.selectButtonText, { color: theme.text }]}>
-                        {endMonth}
+                        {endMonthFormatted}
                       </Text>
                       <Ionicons name="chevron-down" size={16} color={theme.subtext} />
                     </TouchableOpacity>
@@ -603,26 +640,25 @@ export default function NewTransactionScreen() {
             )}
           </View>
 
-          {/* 5ª Sessão: Data (Padrão DD-MM-AAAA com máscara automática) */}
+          {/* 5ª Sessão: Data (com máscara de calendário ao clicar) */}
           <View style={[styles.sectionCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
             <Text style={[styles.cardHeader, { color: theme.subtext }]}>Data (DD-MM-AAAA)</Text>
-            <TextInput
+            <TouchableOpacity
               style={[
                 styles.input,
-                { color: theme.text, borderColor: theme.border, backgroundColor: theme.background },
+                styles.datePickerBtn,
+                { borderColor: theme.border, backgroundColor: theme.background },
               ]}
-              keyboardType="numeric"
-              placeholder="DD-MM-AAAA"
-              placeholderTextColor={theme.subtext}
-              maxLength={10}
-              value={expenseDateBR}
-              onChangeText={(text) => {
-                const masked = formatDateInput(text);
-                setExpenseDateBR(masked);
-              }}
-            />
+              onPress={() => setExpenseCalendarVisible(true)}
+              activeOpacity={0.7}
+            >
+              <Text style={{ color: expenseDateBR ? theme.text : theme.subtext, fontSize: 16 }}>
+                {expenseDateBR || 'DD-MM-AAAA'}
+              </Text>
+              <Ionicons name="calendar-outline" size={20} color={theme.tint} />
+            </TouchableOpacity>
             <Text style={[styles.fieldHint, { color: theme.subtext }]}>
-              Formato dia-mês-ano com máscara automática
+              Toque no campo para abrir o calendário
             </Text>
           </View>
 
@@ -696,24 +732,26 @@ export default function NewTransactionScreen() {
             </RNView>
           </View>
 
-          {/* 2ª Sessão: Data (Padrão DD-MM-AAAA) */}
+          {/* 2ª Sessão: Data (com máscara de calendário ao clicar) */}
           <View style={[styles.sectionCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
             <Text style={[styles.cardHeader, { color: theme.subtext }]}>Data (DD-MM-AAAA)</Text>
-            <TextInput
+            <TouchableOpacity
               style={[
                 styles.input,
-                { color: theme.text, borderColor: theme.border, backgroundColor: theme.background },
+                styles.datePickerBtn,
+                { borderColor: theme.border, backgroundColor: theme.background },
               ]}
-              keyboardType="numeric"
-              placeholder="DD-MM-AAAA"
-              placeholderTextColor={theme.subtext}
-              maxLength={10}
-              value={incomeDateBR}
-              onChangeText={(text) => {
-                const masked = formatDateInput(text);
-                setIncomeDateBR(masked);
-              }}
-            />
+              onPress={() => setIncomeCalendarVisible(true)}
+              activeOpacity={0.7}
+            >
+              <Text style={{ color: incomeDateBR ? theme.text : theme.subtext, fontSize: 16 }}>
+                {incomeDateBR || 'DD-MM-AAAA'}
+              </Text>
+              <Ionicons name="calendar-outline" size={20} color={theme.tint} />
+            </TouchableOpacity>
+            <Text style={[styles.fieldHint, { color: theme.subtext }]}>
+              Toque no campo para abrir o calendário
+            </Text>
           </View>
 
           {/* 3ª Sessão: Categorias (Dinheiro, CIT, CBr, CPb) */}
@@ -939,40 +977,66 @@ export default function NewTransactionScreen() {
             )}
           </View>
 
-          {/* 5ª Sessão: Desconto de CB Mensal (10% da sessão Valor) */}
+          {/* 5ª Sessão: Desconto de CB Mensal (10% da sessão Valor) com Botão Ligar/Desligar */}
           <View
             style={[
               styles.sectionCard,
-              { backgroundColor: theme.card, borderColor: '#0D948840' },
+              { backgroundColor: theme.card, borderColor: applyCbDiscount ? '#0D948840' : theme.border },
             ]}
           >
             <RNView style={styles.discountHeaderRow}>
-              <RNView style={styles.discountIconCircle}>
-                <Ionicons name="trending-down" size={16} color="#0D9488" />
+              <RNView
+                style={[
+                  styles.discountIconCircle,
+                  !applyCbDiscount && { backgroundColor: theme.subtext + '20' },
+                ]}
+              >
+                <Ionicons
+                  name="trending-down"
+                  size={16}
+                  color={applyCbDiscount ? '#0D9488' : theme.subtext}
+                />
               </RNView>
               <RNView style={{ flex: 1 }}>
                 <Text style={[styles.discountCardTitle, { color: theme.text }]}>
                   Desconto de CB Mensal (10%)
                 </Text>
                 <Text style={[styles.discountCardSub, { color: theme.subtext }]}>
-                  Calculado automaticamente sobre o valor da receita
+                  {applyCbDiscount
+                    ? 'Opção ativada: gerará despesa automática'
+                    : 'Opção desativada: nenhuma despesa será criada'}
                 </Text>
               </RNView>
+              {/* Botão de Ligar / Desligar */}
+              <Switch
+                value={applyCbDiscount}
+                onValueChange={setApplyCbDiscount}
+                trackColor={{ false: theme.border, true: theme.tint }}
+                thumbColor="#FFF"
+              />
             </RNView>
 
-            <RNView style={styles.discountAmountBox}>
-              <Text style={styles.discountAmountText}>
-                {formatCurrency(cbMonthlyDiscount)}
-              </Text>
-              <Text style={[styles.discountExplainer, { color: theme.subtext }]}>
-                Ao salvar, será criada automaticamente a despesa:
-                {'\n'}
-                <Text style={{ fontWeight: '700', color: theme.expense }}>
-                  CB Mensal - {receiptType}
-                </Text>{' '}
-                no valor de {formatCurrency(cbMonthlyDiscount)}.
-              </Text>
-            </RNView>
+            {applyCbDiscount ? (
+              <RNView style={styles.discountAmountBox}>
+                <Text style={styles.discountAmountText}>
+                  {formatCurrency(cbMonthlyDiscount)}
+                </Text>
+                <Text style={[styles.discountExplainer, { color: theme.subtext }]}>
+                  Ao salvar, será criada automaticamente a despesa:
+                  {'\n'}
+                  <Text style={{ fontWeight: '700', color: theme.expense }}>
+                    CB Mensal - {receiptType}
+                  </Text>{' '}
+                  no valor de {formatCurrency(cbMonthlyDiscount)}.
+                </Text>
+              </RNView>
+            ) : (
+              <RNView style={[styles.discountAmountBox, { backgroundColor: theme.background, borderColor: theme.border }]}>
+                <Text style={[styles.discountExplainer, { color: theme.subtext, textAlign: 'center' }]}>
+                  Desconto desligado. Apenas a receita será registrada.
+                </Text>
+              </RNView>
+            )}
           </View>
         </>
       )}
@@ -991,62 +1055,61 @@ export default function NewTransactionScreen() {
         </Text>
       </TouchableOpacity>
 
-      {/* MODAL DE ESCOLHA DE MÊS (INÍCIO / TÉRMINO) */}
-      <Modal
+      {/* MODAL DE ESCOLHA DE MÊS E ANO (INÍCIO / TÉRMINO) */}
+      <MonthYearPickerModal
         visible={monthModalTarget !== null}
-        animationType="fade"
-        transparent={true}
-        onRequestClose={() => setMonthModalTarget(null)}
-      >
-        <RNView style={styles.modalBackdrop}>
-          <RNView style={[styles.monthModalCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
-            <Text style={styles.monthModalTitle}>
-              {monthModalTarget === 'START' ? 'Escolha o Mês de Início' : 'Escolha o Mês de Término'}
-            </Text>
+        title={monthModalTarget === 'START' ? 'Mês e Ano de Início' : 'Mês e Ano de Término'}
+        selectedMonth={monthModalTarget === 'START' ? startMonthNum : endMonthNum}
+        selectedYear={monthModalTarget === 'START' ? startYearNum : endYearNum}
+        minYear={monthModalTarget === 'START' ? now.getFullYear() : startYearNum}
+        minMonth={
+          monthModalTarget === 'START'
+            ? now.getMonth() + 1
+            : endYearNum === startYearNum
+            ? startMonthNum
+            : undefined
+        }
+        onSelect={(m, y, formatted, iso) => {
+          if (monthModalTarget === 'START') {
+            setStartMonthNum(m);
+            setStartYearNum(y);
+            setStartMonthFormatted(formatted);
+            setStartMonthISO(iso);
+            // Se o término for anterior ao novo início, ajusta término automaticamente
+            if (y > endYearNum || (y === endYearNum && m > endMonthNum)) {
+              setEndMonthNum(m);
+              setEndYearNum(y);
+              setEndMonthFormatted(formatted);
+              setEndMonthISO(iso);
+            }
+          } else {
+            setEndMonthNum(m);
+            setEndYearNum(y);
+            setEndMonthFormatted(formatted);
+            setEndMonthISO(iso);
+          }
+          setMonthModalTarget(null);
+        }}
+        onClose={() => setMonthModalTarget(null)}
+      />
 
-            <RNView style={styles.monthsGrid}>
-              {MONTH_NAMES_LIST.map((m) => {
-                const isCurrent =
-                  monthModalTarget === 'START' ? startMonth === m : endMonth === m;
-                return (
-                  <TouchableOpacity
-                    key={m}
-                    style={[
-                      styles.monthGridBtn,
-                      { borderColor: theme.border },
-                      isCurrent && { backgroundColor: theme.tint, borderColor: theme.tint },
-                    ]}
-                    onPress={() => {
-                      if (monthModalTarget === 'START') {
-                        setStartMonth(m);
-                      } else {
-                        setEndMonth(m);
-                      }
-                      setMonthModalTarget(null);
-                    }}
-                  >
-                    <Text
-                      style={[
-                        styles.monthGridBtnText,
-                        { color: isCurrent ? '#FFF' : theme.text },
-                      ]}
-                    >
-                      {m}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </RNView>
+      {/* MODAL DE CALENDÁRIO PARA DESPESA */}
+      <CalendarPickerModal
+        visible={expenseCalendarVisible}
+        initialDateBR={expenseDateBR}
+        title="Data da Despesa"
+        onSelect={(d) => setExpenseDateBR(d)}
+        onClose={() => setExpenseCalendarVisible(false)}
+      />
 
-            <TouchableOpacity
-              style={[styles.modalCloseBtn, { borderColor: theme.border }]}
-              onPress={() => setMonthModalTarget(null)}
-            >
-              <Text style={[styles.modalCloseText, { color: theme.text }]}>Fechar</Text>
-            </TouchableOpacity>
-          </RNView>
-        </RNView>
-      </Modal>
+      {/* MODAL DE CALENDÁRIO PARA RECEITA */}
+      <CalendarPickerModal
+        visible={incomeCalendarVisible}
+        initialDateBR={incomeDateBR}
+        title="Data do Recebimento"
+        onSelect={(d) => setIncomeDateBR(d)}
+        onClose={() => setIncomeCalendarVisible(false)}
+      />
     </ScrollView>
   );
 }
@@ -1279,12 +1342,14 @@ const styles = StyleSheet.create({
     width: '48%',
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 2,
+    justifyContent: 'flex-start',
+    gap: 8,
+    paddingVertical: 3,
   },
   noteName: {
     fontSize: 13,
     fontWeight: '600',
+    minWidth: 58,
   },
   noteInput: {
     width: 65,
@@ -1295,6 +1360,11 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     fontSize: 14,
     fontWeight: '700',
+  },
+  datePickerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   autoCalculatedValueCard: {
     borderRadius: 12,
