@@ -7,6 +7,7 @@ import {
   TextInput,
   View as RNView,
   Alert,
+  Modal,
 } from 'react-native';
 import { useLocalSearchParams, useFocusEffect, router, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -14,15 +15,31 @@ import { Ionicons } from '@expo/vector-icons';
 import { Text, View } from '@/components/Themed';
 import Colors from '@/constants/Colors';
 import { useColorScheme } from '@/components/useColorScheme';
-import { Account, Transaction, TransactionStatus } from '@/types';
+import { Account, Transaction } from '@/types';
 import { getAccountById, recalculateAccountBalance } from '@/db/accounts';
 import {
   getTransactions,
   toggleTransactionStatus,
   deleteTransaction,
+  updateTransaction,
   getTransactionSplits,
 } from '@/db/transactions';
-import { formatCurrency, formatDateBR } from '@/utils/formatters';
+import {
+  formatCurrency,
+  formatDateBR,
+  formatCurrencyInput,
+  numericToCurrencyInput,
+  formatDateInput,
+  brDateToISO,
+  isoToBRDate,
+} from '@/utils/formatters';
+
+const CATEGORY_TABS = [
+  { label: 'Dinheiro(Din)', key: 'Dinheiro(Din)' },
+  { label: 'C.Itau (CIT)', key: 'C.Itau (CIT)' },
+  { label: 'C.Bradesco(CBr)', key: 'C.Bradesco(CBr)' },
+  { label: 'C.PagBank(CPb)', key: 'C.PagBank(CPb)' },
+];
 
 export default function AccountDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -34,9 +51,13 @@ export default function AccountDetailScreen() {
   const [account, setAccount] = useState<Account | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [refreshing, setRefreshing] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filterStatus, setFilterStatus] = useState<TransactionStatus | 'ALL'>('ALL');
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [expandedSplits, setExpandedSplits] = useState<Record<number, boolean>>({});
+
+  // Estados do Modal de Edição (Valor e Data)
+  const [editingTx, setEditingTx] = useState<Transaction | null>(null);
+  const [editAmountDigits, setEditAmountDigits] = useState('');
+  const [editDateBR, setEditDateBR] = useState('');
 
   const loadData = useCallback(async () => {
     if (!accountId) return;
@@ -47,8 +68,7 @@ export default function AccountDetailScreen() {
 
       const txs = await getTransactions({
         accountId,
-        status: filterStatus === 'ALL' ? undefined : filterStatus,
-        searchQuery: searchQuery.trim() || undefined,
+        categoryFilter: selectedCategory || undefined,
       });
 
       // Carregar splits para transações divididas
@@ -62,7 +82,7 @@ export default function AccountDetailScreen() {
     } catch (e) {
       console.error('Erro ao carregar livro-caixa da conta:', e);
     }
-  }, [accountId, filterStatus, searchQuery]);
+  }, [accountId, selectedCategory]);
 
   useFocusEffect(
     useCallback(() => {
@@ -74,6 +94,11 @@ export default function AccountDetailScreen() {
     setRefreshing(true);
     await loadData();
     setRefreshing(false);
+  };
+
+  const handleToggleCategory = (catKey: string) => {
+    // Alterna o filtro: se clicar no mesmo, remove para ver todas as categorias
+    setSelectedCategory((prev) => (prev === catKey ? null : catKey));
   };
 
   const handleToggleStatus = async (txId: number) => {
@@ -99,9 +124,47 @@ export default function AccountDetailScreen() {
     setExpandedSplits((prev) => ({ ...prev, [txId]: !prev[txId] }));
   };
 
+  // Abrir Modal de Edição
+  const handleOpenEdit = (tx: Transaction) => {
+    setEditingTx(tx);
+    const curr = numericToCurrencyInput(tx.amount);
+    setEditAmountDigits(curr.rawDigits);
+    setEditDateBR(isoToBRDate(tx.date));
+  };
+
+  // Salvar Edição de Valor e Data
+  const handleSaveEdit = async () => {
+    if (!editingTx) return;
+
+    const { numericValue } = formatCurrencyInput(editAmountDigits);
+    if (numericValue <= 0) {
+      Alert.alert('Valor inválido', 'Informe um valor maior que zero.');
+      return;
+    }
+
+    const isoDate = brDateToISO(editDateBR);
+    if (!isoDate || isoDate.length !== 10) {
+      Alert.alert('Data inválida', 'Informe a data no formato DD-MM-AAAA.');
+      return;
+    }
+
+    try {
+      await updateTransaction(editingTx.id, {
+        amount: numericValue,
+        date: isoDate,
+      });
+
+      setEditingTx(null);
+      await loadData();
+      Alert.alert('Sucesso', 'Lançamento atualizado com sucesso!');
+    } catch (e) {
+      console.error('Erro ao atualizar lançamento:', e);
+      Alert.alert('Erro', 'Não foi possível salvar as alterações.');
+    }
+  };
+
   const isCreditCard = account?.type === 'CREDIT_CARD';
   const creditLimit = account?.credit_limit || 0;
-  // No cartão, saldo negativo significa fatura a pagar
   const usedLimit = Math.abs(account?.current_balance || 0);
   const availableLimit = Math.max(0, creditLimit - usedLimit);
   const usedPercent = creditLimit > 0 ? Math.min(100, Math.round((usedLimit / creditLimit) * 100)) : 0;
@@ -128,39 +191,31 @@ export default function AccountDetailScreen() {
         {/* Cartão de Saldo da Conta */}
         <View style={[styles.balanceCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
           <RNView style={styles.accBadgeRow}>
+            {/* Onde estava "Cash", agora exibe "Valores Recebidos" */}
             <RNView style={[styles.badge, { backgroundColor: (account?.color || theme.tint) + '20' }]}>
               <Ionicons name={isCreditCard ? 'card' : 'wallet'} size={16} color={account?.color || theme.tint} />
               <Text style={[styles.badgeText, { color: account?.color || theme.tint }]}>
-                {account?.type}
+                Valores Recebidos
               </Text>
             </RNView>
 
-            <RNView style={{ flexDirection: 'row', gap: 8 }}>
-              <TouchableOpacity
-                style={[styles.smallActionBtn, { borderColor: theme.border }]}
-                onPress={() => router.push({ pathname: '/import-ofx', params: { accountId: String(accountId) } })}
-              >
-                <Ionicons name="document-text-outline" size={16} color={theme.tint} />
-                <Text style={[styles.smallActionText, { color: theme.tint }]}>OFX</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.newTxBtn, { backgroundColor: theme.tint }]}
-                onPress={() =>
-                  router.push({
-                    pathname: '/new-transaction',
-                    params: { initialAccountId: String(accountId) },
-                  })
-                }
-              >
-                <Ionicons name="add" size={16} color="#FFF" />
-                <Text style={styles.newTxBtnText}>Novo Lançamento</Text>
-              </TouchableOpacity>
-            </RNView>
+            {/* Apenas botão Novo Lançamento (botão OFX removido) */}
+            <TouchableOpacity
+              style={[styles.newTxBtn, { backgroundColor: theme.tint }]}
+              onPress={() =>
+                router.push({
+                  pathname: '/new-transaction',
+                  params: { initialAccountId: String(accountId), initialType: 'INCOME' },
+                })
+              }
+            >
+              <Ionicons name="add" size={16} color="#FFF" />
+              <Text style={styles.newTxBtnText}>Novo Lançamento</Text>
+            </TouchableOpacity>
           </RNView>
 
           <Text style={[styles.balanceLabel, { color: theme.subtext }]}>
-            {isCreditCard ? 'Fatura Atual Aberta' : 'Saldo Atual'}
+            {isCreditCard ? 'Fatura Atual Aberta' : 'Saldo Total Recebido'}
           </Text>
           <Text
             style={[
@@ -171,43 +226,24 @@ export default function AccountDetailScreen() {
             {formatCurrency(account?.current_balance || 0)}
           </Text>
 
-          {/* Gestão Avançada de Cartão de Crédito */}
-          {isCreditCard && (
+          {isCreditCard && creditLimit > 0 && (
             <RNView style={styles.ccDetailsBox}>
-              {creditLimit > 0 && (
-                <>
-                  <RNView style={styles.ccLimitRow}>
-                    <Text style={[styles.ccLimitText, { color: theme.subtext }]}>
-                      Limite Utilizado: {formatCurrency(usedLimit)} ({usedPercent}%)
-                    </Text>
-                    <Text style={[styles.ccLimitText, { color: theme.income, fontWeight: '700' }]}>
-                      Disponível: {formatCurrency(availableLimit)}
-                    </Text>
-                  </RNView>
-
-                  <RNView style={[styles.progressBarBg, { backgroundColor: theme.border }]}>
-                    <RNView
-                      style={[
-                        styles.progressBarFill,
-                        { width: `${usedPercent}%`, backgroundColor: usedPercent > 85 ? theme.expense : theme.tint },
-                      ]}
-                    />
-                  </RNView>
-                </>
-              )}
-
-              {account.closing_day && (
-                <RNView style={styles.ccDatesRow}>
-                  <Text style={[styles.ccDateItem, { color: theme.subtext }]}>
-                    Melhor dia de compra: <Text style={{ fontWeight: '700', color: theme.tint }}>dia {account.closing_day}</Text>
-                  </Text>
-                  {account.due_day && (
-                    <Text style={[styles.ccDateItem, { color: theme.subtext }]}>
-                      Vencimento: <Text style={{ fontWeight: '700', color: theme.text }}>dia {account.due_day}</Text>
-                    </Text>
-                  )}
-                </RNView>
-              )}
+              <RNView style={styles.ccLimitRow}>
+                <Text style={[styles.ccLimitText, { color: theme.subtext }]}>
+                  Limite Utilizado: {formatCurrency(usedLimit)} ({usedPercent}%)
+                </Text>
+                <Text style={[styles.ccLimitText, { color: theme.income, fontWeight: '700' }]}>
+                  Disponível: {formatCurrency(availableLimit)}
+                </Text>
+              </RNView>
+              <RNView style={[styles.progressBarBg, { backgroundColor: theme.border }]}>
+                <RNView
+                  style={[
+                    styles.progressBarFill,
+                    { width: `${usedPercent}%`, backgroundColor: usedPercent > 85 ? theme.expense : theme.tint },
+                  ]}
+                />
+              </RNView>
             </RNView>
           )}
 
@@ -221,119 +257,55 @@ export default function AccountDetailScreen() {
           </RNView>
         </View>
 
-        {/* Barra de Busca e Filtros */}
-        <RNView style={styles.filterSection}>
-          <RNView
-            style={[
-              styles.searchBar,
-              { backgroundColor: theme.card, borderColor: theme.border },
-            ]}
-          >
-            <Ionicons name="search" size={18} color={theme.subtext} />
-            <TextInput
-              style={[styles.searchInput, { color: theme.text }]}
-              placeholder="Buscar favorecido, nota ou categoria..."
-              placeholderTextColor={theme.subtext}
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-            />
-            {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => setSearchQuery('')}>
-                <Ionicons name="close-circle" size={18} color={theme.subtext} />
-              </TouchableOpacity>
-            )}
-          </RNView>
-
-          {/* Chips de Status (MS Money Conciliation filter) */}
+        {/* Filtro por Categorias (Onde o dinheiro estará):
+            1. Dinheiro(Din)
+            2. C.Itau (CIT)
+            3. C.Bradesco(CBr)
+            4. C.PagBank(CPb)
+        */}
+        <RNView style={styles.categoryFilterContainer}>
+          <Text style={[styles.filterNotice, { color: theme.subtext }]}>
+            Filtrar por Destino do Dinheiro:
+          </Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.statusChipsRow}>
-            <TouchableOpacity
-              style={[
-                styles.statusFilterChip,
-                { borderColor: theme.border },
-                filterStatus === 'ALL' && { backgroundColor: theme.text, borderColor: theme.text },
-              ]}
-              onPress={() => setFilterStatus('ALL')}
-            >
-              <Text
-                style={[
-                  styles.statusFilterText,
-                  { color: filterStatus === 'ALL' ? theme.background : theme.text },
-                ]}
-              >
-                Todos
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.statusFilterChip,
-                { borderColor: theme.border },
-                filterStatus === 'UNCLEARED' && {
-                  backgroundColor: theme.uncleared,
-                  borderColor: theme.uncleared,
-                },
-              ]}
-              onPress={() => setFilterStatus('UNCLEARED')}
-            >
-              <Text
-                style={[
-                  styles.statusFilterText,
-                  { color: filterStatus === 'UNCLEARED' ? '#FFF' : theme.text },
-                ]}
-              >
-                Pendentes (P)
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.statusFilterChip,
-                { borderColor: theme.border },
-                filterStatus === 'CLEARED' && {
-                  backgroundColor: theme.cleared,
-                  borderColor: theme.cleared,
-                },
-              ]}
-              onPress={() => setFilterStatus('CLEARED')}
-            >
-              <Text
-                style={[
-                  styles.statusFilterText,
-                  { color: filterStatus === 'CLEARED' ? '#FFF' : theme.text },
-                ]}
-              >
-                Compensados (C)
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.statusFilterChip,
-                { borderColor: theme.border },
-                filterStatus === 'RECONCILED' && {
-                  backgroundColor: theme.reconciled,
-                  borderColor: theme.reconciled,
-                },
-              ]}
-              onPress={() => setFilterStatus('RECONCILED')}
-            >
-              <Text
-                style={[
-                  styles.statusFilterText,
-                  { color: filterStatus === 'RECONCILED' ? '#FFF' : theme.text },
-                ]}
-              >
-                Conciliados (R)
-              </Text>
-            </TouchableOpacity>
+            {CATEGORY_TABS.map((cat) => {
+              const isSelected = selectedCategory === cat.key;
+              return (
+                <TouchableOpacity
+                  key={cat.key}
+                  style={[
+                    styles.statusFilterChip,
+                    { borderColor: theme.border },
+                    isSelected && { backgroundColor: theme.tint, borderColor: theme.tint },
+                  ]}
+                  onPress={() => handleToggleCategory(cat.key)}
+                >
+                  <Text
+                    style={[
+                      styles.statusFilterText,
+                      { color: isSelected ? '#FFF' : theme.text, fontWeight: isSelected ? '700' : '500' },
+                    ]}
+                  >
+                    {cat.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
           </ScrollView>
+          {selectedCategory && (
+            <TouchableOpacity onPress={() => setSelectedCategory(null)} style={{ marginTop: 4 }}>
+              <Text style={{ fontSize: 12, color: theme.tint, fontWeight: '600' }}>
+                ✕ Ver todas as categorias
+              </Text>
+            </TouchableOpacity>
+          )}
         </RNView>
 
-        {/* Tabela do Livro-Caixa (Register) */}
+        {/* Tabela do Livro-Caixa */}
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Livro-Caixa ({transactions.length})</Text>
           <Text style={[styles.helperNotice, { color: theme.subtext }]}>
-            Toque na letra (P/C/R) para conciliar
+            Toque no ícone de lápis para alterar valor e data
           </Text>
         </View>
 
@@ -342,7 +314,9 @@ export default function AccountDetailScreen() {
             <RNView style={styles.emptyView}>
               <Ionicons name="receipt-outline" size={40} color={theme.subtext} />
               <Text style={[styles.emptyText, { color: theme.subtext }]}>
-                Nenhum lançamento encontrado para esta conta.
+                {selectedCategory
+                  ? `Nenhum lançamento encontrado para "${selectedCategory}".`
+                  : 'Nenhum lançamento encontrado para esta conta.'}
               </Text>
             </RNView>
           ) : (
@@ -362,7 +336,7 @@ export default function AccountDetailScreen() {
                   ]}
                 >
                   <RNView style={styles.txRow}>
-                    {/* Botão de Status (Conciliação rápida do MS Money) */}
+                    {/* Botão de Status (Conciliação rápida P/C/R) */}
                     <TouchableOpacity
                       style={[
                         styles.statusBadge,
@@ -395,7 +369,11 @@ export default function AccountDetailScreen() {
                     </TouchableOpacity>
 
                     {/* Informações da Transação */}
-                    <RNView style={styles.txMain}>
+                    <TouchableOpacity
+                      style={styles.txMain}
+                      activeOpacity={0.7}
+                      onPress={() => handleOpenEdit(tx)}
+                    >
                       <RNView style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                         <Text style={styles.txTitle} numberOfLines={1}>
                           {isTransfer
@@ -419,13 +397,12 @@ export default function AccountDetailScreen() {
 
                       <Text style={[styles.txMeta, { color: theme.subtext }]}>
                         {formatDateBR(tx.date)} • {hasSplits ? 'Transação Dividida' : tx.category_name || (isTransfer ? 'Transferência' : 'Geral')}
-                        {tx.check_number ? ` • Doc #${tx.check_number}` : ''}
                       </Text>
 
                       {tx.notes && <Text style={[styles.txNotes, { color: theme.subtext }]}>{tx.notes}</Text>}
-                    </RNView>
+                    </TouchableOpacity>
 
-                    {/* Valor e Ações */}
+                    {/* Valor e Ações (Editar e Excluir) */}
                     <RNView style={styles.txRight}>
                       <Text
                         style={[
@@ -437,16 +414,29 @@ export default function AccountDetailScreen() {
                         {formatCurrency(tx.amount)}
                       </Text>
 
-                      <TouchableOpacity
-                        style={styles.deleteBtn}
-                        onPress={() => handleDelete(tx.id)}
-                      >
-                        <Ionicons name="trash-outline" size={16} color={theme.subtext} />
-                      </TouchableOpacity>
+                      <RNView style={styles.actionsRow}>
+                        {/* Botão de Edição (Opção de alterar valor e data) */}
+                        <TouchableOpacity
+                          style={styles.actionIconBtn}
+                          onPress={() => handleOpenEdit(tx)}
+                          accessibilityLabel="Editar lançamento"
+                        >
+                          <Ionicons name="pencil" size={16} color={theme.tint} />
+                        </TouchableOpacity>
+
+                        {/* Botão Excluir */}
+                        <TouchableOpacity
+                          style={styles.actionIconBtn}
+                          onPress={() => handleDelete(tx.id)}
+                          accessibilityLabel="Excluir lançamento"
+                        >
+                          <Ionicons name="trash-outline" size={16} color={theme.expense} />
+                        </TouchableOpacity>
+                      </RNView>
                     </RNView>
                   </RNView>
 
-                  {/* Fatias da Transação Dividida (Splits Breakdown) */}
+                  {/* Fatias da Transação Dividida (Splits) */}
                   {hasSplits && isExpanded && (
                     <RNView style={[styles.splitsBreakdown, { backgroundColor: theme.background }]}>
                       {tx.splits?.map((s, sIdx) => (
@@ -470,6 +460,81 @@ export default function AccountDetailScreen() {
           )}
         </View>
       </ScrollView>
+
+      {/* MODAL DE EDIÇÃO DE VALOR E DATA */}
+      <Modal
+        visible={!!editingTx}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setEditingTx(null)}
+      >
+        <RNView style={styles.modalOverlay}>
+          <RNView style={[styles.modalContent, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <RNView style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Editar Lançamento</Text>
+              <TouchableOpacity onPress={() => setEditingTx(null)}>
+                <Ionicons name="close-circle" size={24} color={theme.subtext} />
+              </TouchableOpacity>
+            </RNView>
+
+            {/* Campo de Valor com máscara monetária da direita para a esquerda */}
+            <Text style={[styles.inputLabel, { color: theme.subtext }]}>
+              Valor
+            </Text>
+            <TextInput
+              style={[
+                styles.modalInput,
+                { color: theme.text, borderColor: theme.border, backgroundColor: theme.background },
+              ]}
+              keyboardType="numeric"
+              placeholder="R$ 0,00"
+              placeholderTextColor={theme.subtext}
+              value={formatCurrencyInput(editAmountDigits).formatted}
+              onChangeText={(text) => {
+                const digits = text.replace(/\D/g, '');
+                setEditAmountDigits(digits);
+              }}
+            />
+
+            {/* Campo de Data no padrão brasileiro DD-MM-AAAA */}
+            <Text style={[styles.inputLabel, { color: theme.subtext, marginTop: 12 }]}>
+              Data (DD-MM-AAAA)
+            </Text>
+            <TextInput
+              style={[
+                styles.modalInput,
+                { color: theme.text, borderColor: theme.border, backgroundColor: theme.background },
+              ]}
+              keyboardType="numeric"
+              placeholder="DD-MM-AAAA"
+              placeholderTextColor={theme.subtext}
+              maxLength={10}
+              value={editDateBR}
+              onChangeText={(text) => {
+                const masked = formatDateInput(text);
+                setEditDateBR(masked);
+              }}
+            />
+
+            {/* Botões do Modal */}
+            <RNView style={styles.modalButtonsRow}>
+              <TouchableOpacity
+                style={[styles.modalBtnCancel, { borderColor: theme.border }]}
+                onPress={() => setEditingTx(null)}
+              >
+                <Text style={[styles.modalBtnTextCancel, { color: theme.text }]}>Cancelar</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalBtnSave, { backgroundColor: theme.tint }]}
+                onPress={handleSaveEdit}
+              >
+                <Text style={styles.modalBtnTextSave}>Salvar Alterações</Text>
+              </TouchableOpacity>
+            </RNView>
+          </RNView>
+        </RNView>
+      </Modal>
     </View>
   );
 }
@@ -498,26 +563,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 10,
-    paddingVertical: 4,
+    paddingVertical: 5,
     borderRadius: 8,
-    gap: 4,
+    gap: 6,
   },
   badgeText: {
-    fontSize: 12,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-  },
-  smallActionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
-    borderWidth: 1,
-    gap: 4,
-  },
-  smallActionText: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
   },
   newTxBtn: {
@@ -534,18 +585,31 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   balanceLabel: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '500',
-    textTransform: 'uppercase',
   },
   currentBalance: {
-    fontSize: 30,
+    fontSize: 28,
     fontWeight: '800',
-    marginVertical: 4,
+    marginTop: 4,
+    marginBottom: 12,
+  },
+  clearedRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderTopWidth: 1,
+    paddingTop: 10,
+  },
+  clearedLabel: {
+    fontSize: 13,
+  },
+  clearedVal: {
+    fontSize: 14,
+    fontWeight: '700',
   },
   ccDetailsBox: {
-    marginVertical: 8,
-    paddingTop: 8,
+    marginVertical: 10,
   },
   ccLimitRow: {
     flexDirection: 'row',
@@ -556,101 +620,75 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   progressBarBg: {
-    height: 6,
-    borderRadius: 3,
+    height: 8,
+    borderRadius: 4,
     overflow: 'hidden',
-    marginBottom: 8,
   },
   progressBarFill: {
-    height: '100%',
-    borderRadius: 3,
+    height: 8,
+    borderRadius: 4,
   },
-  ccDatesRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  ccDateItem: {
-    fontSize: 12,
-  },
-  clearedRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingTop: 12,
-    marginTop: 8,
-    borderTopWidth: 1,
-  },
-  clearedLabel: {
-    fontSize: 12,
-  },
-  clearedVal: {
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  filterSection: {
+  categoryFilterContainer: {
     marginBottom: 16,
-    gap: 10,
   },
-  searchBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    gap: 8,
-  },
-  searchInput: {
-    flex: 1,
-    fontSize: 14,
+  filterNotice: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 8,
   },
   statusChipsRow: {
     flexDirection: 'row',
   },
   statusFilterChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
     borderWidth: 1,
     marginRight: 8,
   },
   statusFilterText: {
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: 13,
   },
   sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'baseline',
     marginBottom: 10,
   },
   sectionTitle: {
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: '700',
   },
   helperNotice: {
     fontSize: 11,
+    marginTop: 2,
   },
   registerList: {
-    borderRadius: 14,
+    borderRadius: 16,
     borderWidth: 1,
     overflow: 'hidden',
   },
+  emptyView: {
+    padding: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyText: {
+    fontSize: 13,
+    marginTop: 8,
+    textAlign: 'center',
+  },
   txContainer: {
-    width: '100%',
+    padding: 14,
   },
   txRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 14,
   },
   statusBadge: {
     width: 28,
     height: 28,
     borderRadius: 14,
-    justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 12,
+    justifyContent: 'center',
+    marginRight: 10,
   },
   statusBadgeText: {
     fontSize: 12,
@@ -658,22 +696,11 @@ const styles = StyleSheet.create({
   },
   txMain: {
     flex: 1,
+    marginRight: 8,
   },
   txTitle: {
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '600',
-  },
-  splitBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    gap: 2,
-  },
-  splitBadgeText: {
-    fontSize: 10,
-    fontWeight: '700',
   },
   txMeta: {
     fontSize: 12,
@@ -684,48 +711,117 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     marginTop: 2,
   },
+  splitBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    gap: 3,
+  },
+  splitBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
   txRight: {
     alignItems: 'flex-end',
-    gap: 6,
   },
   txAmount: {
     fontSize: 15,
     fontWeight: '700',
+    marginBottom: 4,
   },
-  deleteBtn: {
+  actionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  actionIconBtn: {
     padding: 4,
   },
   splitsBreakdown: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#E2E8F0',
-    gap: 6,
+    marginTop: 8,
+    padding: 8,
+    borderRadius: 8,
   },
   splitBreakdownRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    paddingVertical: 4,
   },
   splitDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
   splitCatName: {
     fontSize: 12,
-    fontWeight: '500',
   },
   splitAmountText: {
     fontSize: 12,
+    fontWeight: '600',
+  },
+  // Modal de Edição
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContent: {
+    width: '100%',
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 20,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 18,
     fontWeight: '700',
   },
-  emptyView: {
-    padding: 30,
-    alignItems: 'center',
-    gap: 8,
-  },
-  emptyText: {
+  inputLabel: {
     fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 6,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 16,
+  },
+  modalButtonsRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 12,
+    marginTop: 20,
+  },
+  modalBtnCancel: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  modalBtnTextCancel: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  modalBtnSave: {
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  modalBtnTextSave: {
+    color: '#FFF',
+    fontSize: 14,
+    fontWeight: '700',
   },
 });

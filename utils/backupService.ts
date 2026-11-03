@@ -3,11 +3,12 @@ import { getDatabase } from '@/db/database';
 import * as Sharing from 'expo-sharing';
 import { Platform } from 'react-native';
 import { getTodayISO } from './formatters';
+import { scheduleExpenseReminderNotifications } from '@/services/notificationService';
 
 export async function exportBackup(): Promise<string> {
   const db = await getDatabase();
 
-  const [accounts, categories, payees, transactions, splits, budgets, bills] = await Promise.all([
+  const [accounts, categories, payees, transactions, splits, budgets, bills, settings] = await Promise.all([
     db.getAllAsync('SELECT * FROM accounts'),
     db.getAllAsync('SELECT * FROM categories'),
     db.getAllAsync('SELECT * FROM payees'),
@@ -15,10 +16,11 @@ export async function exportBackup(): Promise<string> {
     db.getAllAsync('SELECT * FROM transaction_splits'),
     db.getAllAsync('SELECT * FROM budgets'),
     db.getAllAsync('SELECT * FROM scheduled_bills'),
+    db.getAllAsync('SELECT * FROM app_settings'),
   ]);
 
   const backupData = {
-    version: 1,
+    version: 2,
     appName: 'HGB Finanças',
     exportedAt: new Date().toISOString(),
     data: {
@@ -29,6 +31,7 @@ export async function exportBackup(): Promise<string> {
       transaction_splits: splits,
       budgets,
       scheduled_bills: bills,
+      app_settings: settings,
     },
   };
 
@@ -87,6 +90,7 @@ export async function restoreBackup(jsonString: string): Promise<void> {
       DELETE FROM categories;
       DELETE FROM payees;
       DELETE FROM accounts;
+      DELETE FROM app_settings;
     `);
 
     // Restaurar contas
@@ -112,12 +116,12 @@ export async function restoreBackup(jsonString: string): Promise<void> {
       await db.runAsync('INSERT OR IGNORE INTO payees (id, name) VALUES (?, ?)', [p.id, p.name]);
     }
 
-    // Restaurar transações
+    // Restaurar transações com novos campos de recorrência
     for (const t of d.transactions || []) {
       await db.runAsync(
-        `INSERT INTO transactions (id, account_id, destination_account_id, category_id, payee_id, amount, type, date, status, notes, check_number, is_split, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [t.id, t.account_id, t.destination_account_id || null, t.category_id || null, t.payee_id || null, t.amount, t.type, t.date, t.status, t.notes || null, t.check_number || null, t.is_split || 0, t.created_at]
+        `INSERT INTO transactions (id, account_id, destination_account_id, category_id, payee_id, amount, type, date, status, notes, check_number, is_split, expense_type, start_month, end_month, due_day, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [t.id, t.account_id, t.destination_account_id || null, t.category_id || null, t.payee_id || null, t.amount, t.type, t.date, t.status, t.notes || null, t.check_number || null, t.is_split || 0, t.expense_type || 'UNICO', t.start_month || null, t.end_month || null, t.due_day || null, t.created_at]
       );
     }
 
@@ -148,7 +152,17 @@ export async function restoreBackup(jsonString: string): Promise<void> {
       );
     }
 
+    // Restaurar configurações do app
+    if (d.app_settings) {
+      for (const s of d.app_settings) {
+        await db.runAsync('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)', [s.key, s.value]);
+      }
+    }
+
     await recalculateAllAccountBalances();
+    try {
+      await scheduleExpenseReminderNotifications();
+    } catch {}
   } finally {
     await db.execAsync('PRAGMA foreign_keys = ON;');
   }

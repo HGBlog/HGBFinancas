@@ -7,6 +7,7 @@ import { View, ActivityIndicator } from 'react-native';
 
 import { useColorScheme } from '@/components/useColorScheme';
 import { getDatabase } from '@/db/database';
+import { initNotifications, scheduleExpenseReminderNotifications } from '@/services/notificationService';
 
 export {
   ErrorBoundary,
@@ -32,6 +33,12 @@ export default function RootLayout() {
     async function init() {
       try {
         await getDatabase();
+        try {
+          await initNotifications();
+          await scheduleExpenseReminderNotifications();
+        } catch (notifErr) {
+          console.warn('Aviso ao inicializar notificações:', notifErr);
+        }
       } catch (e) {
         console.error('Erro ao inicializar banco de dados SQLite:', e);
       } finally {
@@ -91,6 +98,13 @@ function RootLayoutNav() {
           name="import-ofx" 
           options={{ 
             title: 'Importar Extrato OFX',
+            headerShown: true 
+          }} 
+        />
+        <Stack.Screen 
+          name="settings" 
+          options={{ 
+            title: 'Configurações',
             headerShown: true 
           }} 
         />

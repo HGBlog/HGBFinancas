@@ -22,8 +22,10 @@ export interface Account {
 
 export type TransactionType = 'EXPENSE' | 'INCOME' | 'TRANSFER';
 
+export type ExpenseRecurrenceType = 'UNICO' | 'MENSAL' | 'ANUAL' | 'PERSONALIZAR';
+
 export type TransactionStatus = 
-  | 'CLEARED'    // Compensado (C)
+  | 'CLEARED'    // Compensado (C) / Pago
   | 'RECONCILED' // Conciliado (R)
   | 'UNCLEARED'; // Não compensado / Pendente (P)
 
@@ -50,6 +52,10 @@ export interface Transaction {
   notes?: string | null;
   check_number?: string | null;
   is_split?: number; // 0 ou 1
+  expense_type?: ExpenseRecurrenceType;
+  start_month?: string | null;
+  end_month?: string | null;
+  due_day?: number | null;
   created_at: string;
   
   // Joined fields for display

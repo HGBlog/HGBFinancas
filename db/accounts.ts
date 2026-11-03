@@ -151,3 +151,111 @@ export async function recalculateAllAccountBalances(): Promise<void> {
     await recalculateAccountBalance(acc.id);
   }
 }
+
+export interface CbDonationsSummary {
+  cbTotal: number;
+  cbAccountId?: number;
+  coletasTotal: number;
+  coletasAccountId?: number;
+  outrosTotal: number;
+  outrosAccountId?: number;
+}
+
+export async function getCbDonationsSummary(monthPrefix?: string): Promise<CbDonationsSummary> {
+  const db = await getDatabase();
+  const accounts = await getAccounts();
+
+  const cbAcc = accounts.find(
+    (a) => a.name.trim().toUpperCase() === 'CB' || a.name.trim().toUpperCase().startsWith('CB')
+  );
+  const coletasAcc = accounts.find((a) => a.name.trim().toUpperCase().includes('COLETA'));
+  const outrosAcc = accounts.find((a) => a.name.trim().toUpperCase().includes('OUTRO'));
+
+  // A sessão CB e Doações deve mostrar SOMENTE receitas (type = 'INCOME') e não despesas!
+  if (monthPrefix) {
+    let cbTotal = 0;
+    if (cbAcc) {
+      const cbRes = await db.getFirstAsync<{ sum: number | null }>(
+        `SELECT SUM(amount) as sum 
+         FROM transactions 
+         WHERE (account_id = ? OR category_id IN (SELECT id FROM categories WHERE UPPER(name) LIKE '%CB%'))
+           AND type = 'INCOME'
+           AND date LIKE ?`,
+        [cbAcc.id, `${monthPrefix}%`]
+      );
+      cbTotal = cbRes?.sum ?? 0;
+    }
+
+    let coletasTotal = 0;
+    if (coletasAcc) {
+      const coletasRes = await db.getFirstAsync<{ sum: number | null }>(
+        `SELECT SUM(amount) as sum 
+         FROM transactions 
+         WHERE (account_id = ? OR category_id IN (SELECT id FROM categories WHERE UPPER(name) LIKE '%COLETA%'))
+           AND type = 'INCOME'
+           AND date LIKE ?`,
+        [coletasAcc.id, `${monthPrefix}%`]
+      );
+      coletasTotal = coletasRes?.sum ?? 0;
+    }
+
+    let outrosTotal = 0;
+    if (outrosAcc) {
+      const outrosRes = await db.getFirstAsync<{ sum: number | null }>(
+        `SELECT SUM(amount) as sum 
+         FROM transactions 
+         WHERE (account_id = ? OR category_id IN (SELECT id FROM categories WHERE UPPER(name) LIKE '%OUTRO%' OR UPPER(name) LIKE '%DOA%'))
+           AND type = 'INCOME'
+           AND date LIKE ?`,
+        [outrosAcc.id, `${monthPrefix}%`]
+      );
+      outrosTotal = outrosRes?.sum ?? 0;
+    }
+
+    return {
+      cbTotal,
+      cbAccountId: cbAcc?.id,
+      coletasTotal,
+      coletasAccountId: coletasAcc?.id,
+      outrosTotal,
+      outrosAccountId: outrosAcc?.id,
+    };
+  }
+
+  // Se não houver monthPrefix, somar todas as receitas registradas para cada conta
+  let cbTotalAll = 0;
+  if (cbAcc) {
+    const r = await db.getFirstAsync<{ sum: number | null }>(
+      "SELECT SUM(amount) as sum FROM transactions WHERE account_id = ? AND type = 'INCOME'",
+      [cbAcc.id]
+    );
+    cbTotalAll = r?.sum ?? 0;
+  }
+
+  let coletasTotalAll = 0;
+  if (coletasAcc) {
+    const r = await db.getFirstAsync<{ sum: number | null }>(
+      "SELECT SUM(amount) as sum FROM transactions WHERE account_id = ? AND type = 'INCOME'",
+      [coletasAcc.id]
+    );
+    coletasTotalAll = r?.sum ?? 0;
+  }
+
+  let outrosTotalAll = 0;
+  if (outrosAcc) {
+    const r = await db.getFirstAsync<{ sum: number | null }>(
+      "SELECT SUM(amount) as sum FROM transactions WHERE account_id = ? AND type = 'INCOME'",
+      [outrosAcc.id]
+    );
+    outrosTotalAll = r?.sum ?? 0;
+  }
+
+  return {
+    cbTotal: cbTotalAll,
+    cbAccountId: cbAcc?.id,
+    coletasTotal: coletasTotalAll,
+    coletasAccountId: coletasAcc?.id,
+    outrosTotal: outrosTotalAll,
+    outrosAccountId: outrosAcc?.id,
+  };
+}

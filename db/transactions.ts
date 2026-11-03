@@ -1,11 +1,14 @@
 import { getDatabase } from './database';
-import { Transaction, TransactionStatus, TransactionType, FinancialSummary, TransactionSplit } from '@/types';
+import { Transaction, TransactionStatus, TransactionType, FinancialSummary, TransactionSplit, ExpenseRecurrenceType } from '@/types';
 import { recalculateAccountBalance } from './accounts';
+import { MONTH_NAMES_LIST } from '@/utils/formatters';
 
 export interface TransactionFilter {
   accountId?: number;
+  categoryFilter?: string;
   startDate?: string;
   endDate?: string;
+  monthPrefix?: string;
   status?: TransactionStatus;
   type?: TransactionType;
   limit?: number;
@@ -35,6 +38,16 @@ export async function getTransactions(filters: TransactionFilter = {}): Promise<
   if (filters.accountId) {
     query += ' AND (t.account_id = ? OR t.destination_account_id = ?)';
     params.push(filters.accountId, filters.accountId);
+  }
+
+  if (filters.categoryFilter) {
+    query += ' AND c.name LIKE ?';
+    params.push(`%${filters.categoryFilter}%`);
+  }
+
+  if (filters.monthPrefix) {
+    query += ' AND t.date LIKE ?';
+    params.push(`${filters.monthPrefix}%`);
   }
 
   if (filters.startDate) {
@@ -126,17 +139,23 @@ export async function createTransaction(data: {
   status?: TransactionStatus;
   notes?: string | null;
   check_number?: string | null;
+  expense_type?: ExpenseRecurrenceType;
+  start_month?: string | null;
+  end_month?: string | null;
+  due_day?: number | null;
   splits?: { category_id: number; amount: number; memo?: string }[];
 }): Promise<number> {
   const db = await getDatabase();
   const status = data.status || 'UNCLEARED';
   const isSplit = data.splits && data.splits.length > 0 ? 1 : 0;
+  const expenseType = data.expense_type || 'UNICO';
 
   const result = await db.runAsync(
     `INSERT INTO transactions (
       account_id, destination_account_id, category_id, payee_id,
-      amount, type, date, status, notes, check_number, is_split
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      amount, type, date, status, notes, check_number, is_split,
+      expense_type, start_month, end_month, due_day
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       data.account_id,
       data.destination_account_id || null,
@@ -149,6 +168,10 @@ export async function createTransaction(data: {
       data.notes || null,
       data.check_number || null,
       isSplit,
+      expenseType,
+      data.start_month || null,
+      data.end_month || null,
+      data.due_day || null,
     ]
   );
 
@@ -199,6 +222,10 @@ export async function updateTransaction(
     'notes',
     'check_number',
     'is_split',
+    'expense_type',
+    'start_month',
+    'end_month',
+    'due_day',
   ] as const;
 
   for (const field of allowedFields) {
@@ -239,32 +266,172 @@ export async function deleteTransaction(id: number): Promise<void> {
   }
 }
 
-// Alternância rápida de status (Pendente -> Compensado -> Conciliado)
+// Alternância rápida de status de pagamento (Não Pago / UNCLEARED <-> Pago / CLEARED)
 export async function toggleTransactionStatus(id: number): Promise<TransactionStatus> {
   const db = await getDatabase();
   const tx = await getTransactionById(id);
   if (!tx) return 'UNCLEARED';
 
-  let nextStatus: TransactionStatus = 'UNCLEARED';
-  if (tx.status === 'UNCLEARED') {
-    nextStatus = 'CLEARED';
-  } else if (tx.status === 'CLEARED') {
-    nextStatus = 'RECONCILED';
-  } else {
-    nextStatus = 'UNCLEARED';
-  }
+  const isPaid = tx.status === 'CLEARED' || tx.status === 'RECONCILED';
+  const nextStatus: TransactionStatus = isPaid ? 'UNCLEARED' : 'CLEARED';
 
   await db.runAsync('UPDATE transactions SET status = ? WHERE id = ?', [nextStatus, id]);
+  await recalculateAccountBalance(tx.account_id);
   return nextStatus;
+}
+
+/**
+ * Retorna as despesas para a Fatura Mensal / Painel, aplicando as regras:
+ * 1. Despesas Únicas do mês + Despesas Únicas anteriores NÃO PAGAS que se acumulam
+ * 2. Despesas Mensais (no mesmo dia, refletindo o último valor editado)
+ * 3. Despesas Anuais (no mesmo mês e dia de cada ano)
+ * 4. Despesas Personalizadas (entre o mês de Início e Término)
+ */
+export async function getMonthlyExpensesStatement(monthISO: string): Promise<Transaction[]> {
+  const db = await getDatabase();
+  const [selectedYearStr, selectedMonthStr] = monthISO.split('-');
+  const selectedYear = parseInt(selectedYearStr, 10);
+  const selectedMonthNum = parseInt(selectedMonthStr, 10); // 1 to 12
+
+  // Buscar todas as despesas cadastradas
+  const allExpenses = await db.getAllAsync<Transaction>(`
+    SELECT 
+      t.*,
+      a.name as account_name,
+      c.name as category_name,
+      c.color as category_color,
+      c.icon as category_icon,
+      p.name as payee_name
+    FROM transactions t
+    LEFT JOIN accounts a ON t.account_id = a.id
+    LEFT JOIN categories c ON t.category_id = c.id
+    LEFT JOIN payees p ON t.payee_id = p.id
+    WHERE t.type = 'EXPENSE'
+    ORDER BY t.date ASC, t.id ASC
+  `);
+
+  const results: Transaction[] = [];
+
+  for (const exp of allExpenses) {
+    const expDate = exp.date;
+    const [expYearStr, expMonthStr, expDayStr] = expDate.split('-');
+    const expYear = parseInt(expYearStr, 10);
+    const expMonthNum = parseInt(expMonthStr, 10);
+    const expDay = parseInt(expDayStr, 10) || exp.due_day || 1;
+    const expMonthISO = `${expYearStr}-${expMonthStr}`;
+
+    const expType = exp.expense_type || 'UNICO';
+
+    if (expType === 'MENSAL') {
+      // Aparece todos os meses a partir do mês de cadastro até ser excluída
+      if (monthISO >= expMonthISO) {
+        const itemDate = `${monthISO}-${String(expDay).padStart(2, '0')}`;
+        results.push({
+          ...exp,
+          date: itemDate,
+        });
+      }
+    } else if (expType === 'ANUAL') {
+      // Aparece no mesmo mês e dia todo ano a partir do cadastro
+      if (selectedMonthNum === expMonthNum && selectedYear >= expYear) {
+        const itemDate = `${monthISO}-${String(expDay).padStart(2, '0')}`;
+        results.push({
+          ...exp,
+          date: itemDate,
+        });
+      }
+    } else if (expType === 'PERSONALIZAR') {
+      // Início e Término por nome do mês
+      const startIdx = exp.start_month ? (MONTH_NAMES_LIST as readonly string[]).indexOf(exp.start_month) + 1 : 1;
+      const endIdx = exp.end_month ? (MONTH_NAMES_LIST as readonly string[]).indexOf(exp.end_month) + 1 : 12;
+
+      let inRange = false;
+      if (startIdx <= endIdx) {
+        inRange = selectedMonthNum >= startIdx && selectedMonthNum <= endIdx;
+      } else {
+        // Virada de ano (ex: Nov a Fev)
+        inRange = selectedMonthNum >= startIdx || selectedMonthNum <= endIdx;
+      }
+
+      if (inRange && selectedYear >= expYear) {
+        const itemDate = `${monthISO}-${String(expDay).padStart(2, '0')}`;
+        results.push({
+          ...exp,
+          date: itemDate,
+        });
+      }
+    } else {
+      // ÚNICO
+      if (expMonthISO === monthISO) {
+        // Despesa do próprio mês
+        results.push(exp);
+      } else if (expMonthISO < monthISO && exp.status !== 'CLEARED' && exp.status !== 'RECONCILED') {
+        // Despesa de mês anterior NÃO PAGA: acumula e continua aparecendo até o pagamento!
+        results.push({
+          ...exp,
+          notes: exp.notes ? `[Acumulada de ${expMonthStr}/${expYearStr}] ${exp.notes}` : `[Acumulada de ${expMonthStr}/${expYearStr}]`,
+        });
+      }
+    }
+  }
+
+  // Carregar splits para transações divididas
+  for (const t of results) {
+    if (t.is_split === 1) {
+      t.splits = await getTransactionSplits(t.id);
+    }
+  }
+
+  return results;
+}
+
+export async function getAvailableRevenue(monthPrefix: string): Promise<number> {
+  const db = await getDatabase();
+  const [year, month] = monthPrefix.split('-').map(Number);
+  const lastDay = new Date(year, month, 0).getDate();
+  const lastDateOfMonth = `${monthPrefix}-${String(lastDay).padStart(2, '0')}`;
+
+  const incomeUpToMonth = await db.getFirstAsync<{ sum: number | null }>(
+    `SELECT SUM(amount) as sum FROM transactions 
+     WHERE type = 'INCOME' AND date <= ?`,
+    [lastDateOfMonth]
+  );
+  const paidExpenseUpToMonth = await db.getFirstAsync<{ sum: number | null }>(
+    `SELECT SUM(amount) as sum FROM transactions 
+     WHERE type = 'EXPENSE' AND (status = 'CLEARED' OR status = 'RECONCILED') AND date <= ?`,
+    [lastDateOfMonth]
+  );
+  const inSum = incomeUpToMonth?.sum ?? 0;
+  const paidOutSum = paidExpenseUpToMonth?.sum ?? 0;
+  return Math.max(0, inSum - paidOutSum);
 }
 
 export async function getFinancialSummary(monthPrefix: string): Promise<FinancialSummary> {
   const db = await getDatabase();
 
-  // Saldo total de todas as contas ativas
-  const totalBalanceResult = await db.getFirstAsync<{ total: number | null }>(
-    'SELECT SUM(current_balance) as total FROM accounts WHERE is_archived = 0'
+  const [year, month] = monthPrefix.split('-').map(Number);
+  const lastDay = new Date(year, month, 0).getDate();
+  const lastDateOfMonth = `${monthPrefix}-${String(lastDay).padStart(2, '0')}`;
+
+  // Receitas acumuladas até o final do mês selecionado
+  const incomeUpToMonth = await db.getFirstAsync<{ sum: number | null }>(
+    `SELECT SUM(amount) as sum FROM transactions 
+     WHERE type = 'INCOME' AND date <= ?`,
+    [lastDateOfMonth]
   );
+
+  // Despesas pagas acumuladas até o final do mês selecionado
+  const paidExpenseUpToMonth = await db.getFirstAsync<{ sum: number | null }>(
+    `SELECT SUM(amount) as sum FROM transactions 
+     WHERE type = 'EXPENSE' AND (status = 'CLEARED' OR status = 'RECONCILED') AND date <= ?`,
+    [lastDateOfMonth]
+  );
+
+  const inSum = incomeUpToMonth?.sum ?? 0;
+  const paidOutSum = paidExpenseUpToMonth?.sum ?? 0;
+
+  // Valor total em mãos: somente valores de receita que não foram usados para pagar contas (se todos usados, R$ 0,00)
+  const totalBalance = Math.max(0, inSum - paidOutSum);
 
   // Receitas do mês
   const incomeResult = await db.getFirstAsync<{ sum: number | null }>(
@@ -273,23 +440,19 @@ export async function getFinancialSummary(monthPrefix: string): Promise<Financia
     [`${monthPrefix}%`]
   );
 
-  // Despesas do mês
-  const expenseResult = await db.getFirstAsync<{ sum: number | null }>(
-    `SELECT SUM(amount) as sum FROM transactions 
-     WHERE type = 'EXPENSE' AND date LIKE ?`,
-    [`${monthPrefix}%`]
-  );
+  // Despesas totais do mês calculadas via getMonthlyExpensesStatement (incluindo acumuladas e recorrentes)
+  const monthlyExpenses = await getMonthlyExpensesStatement(monthPrefix);
+  const totalExpenseMonth = monthlyExpenses.reduce((sum, item) => sum + item.amount, 0);
 
-  // Não compensados (pendentes) em aberto
+  const totalIncomeMonth = incomeResult?.sum ?? 0;
+  const monthlyNet = totalIncomeMonth - totalExpenseMonth;
+
+  // Total não compensado
   const unclearedResult = await db.getFirstAsync<{ sum: number | null }>(
     `SELECT SUM(amount) as sum FROM transactions 
-     WHERE status = 'UNCLEARED' AND type = 'EXPENSE'`
+     WHERE status = 'UNCLEARED' AND date <= ?`,
+    [lastDateOfMonth]
   );
-
-  const totalBalance = totalBalanceResult?.total ?? 0;
-  const totalIncomeMonth = incomeResult?.sum ?? 0;
-  const totalExpenseMonth = expenseResult?.sum ?? 0;
-  const monthlyNet = totalIncomeMonth - totalExpenseMonth;
   const unclearedTotal = unclearedResult?.sum ?? 0;
 
   return {

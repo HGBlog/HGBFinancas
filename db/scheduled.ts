@@ -93,3 +93,106 @@ export async function payScheduledBill(billId: number): Promise<void> {
   await db.runAsync('UPDATE scheduled_bills SET next_due_date = ? WHERE id = ?', [nextIso, billId]);
 }
 
+export interface UpcomingBillItem {
+  id: string;
+  rawId: number;
+  source: 'SCHEDULED' | 'TRANSACTION';
+  title: string;
+  amount: number;
+  dueDate: string; // YYYY-MM-DD
+  accountName?: string;
+  categoryName?: string;
+  isOverdue: boolean;
+  isDueToday: boolean;
+  daysDiff: number;
+}
+
+export async function getUpcomingAndOverdueBills(): Promise<UpcomingBillItem[]> {
+  const db = await getDatabase();
+  const today = new Date().toISOString().split('T')[0];
+  const items: UpcomingBillItem[] = [];
+
+  // 1. Contas agendadas ativas (tipo EXPENSE)
+  const scheduled = await db.getAllAsync<ScheduledBill>(`
+    SELECT 
+      s.*,
+      a.name as account_name,
+      c.name as category_name,
+      p.name as payee_name
+    FROM scheduled_bills s
+    LEFT JOIN accounts a ON s.account_id = a.id
+    LEFT JOIN categories c ON s.category_id = c.id
+    LEFT JOIN payees p ON s.payee_id = p.id
+    WHERE s.is_active = 1 AND s.type = 'EXPENSE'
+  `);
+
+  for (const s of scheduled) {
+    const isOverdue = s.next_due_date < today;
+    const isDueToday = s.next_due_date === today;
+    const diffTime = new Date(s.next_due_date).getTime() - new Date(today).getTime();
+    const daysDiff = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    items.push({
+      id: `sch_${s.id}`,
+      rawId: s.id,
+      source: 'SCHEDULED',
+      title: s.payee_name || s.notes || s.category_name || 'Despesa Agendada',
+      amount: s.amount,
+      dueDate: s.next_due_date,
+      accountName: s.account_name,
+      categoryName: s.category_name,
+      isOverdue,
+      isDueToday,
+      daysDiff,
+    });
+  }
+
+  // 2. Transações pendentes não compensadas (despesas registradas como UNCLEARED)
+  const pendingTxs = await db.getAllAsync<{
+    id: number;
+    amount: number;
+    date: string;
+    notes: string | null;
+    account_name: string | null;
+    category_name: string | null;
+    payee_name: string | null;
+  }>(`
+    SELECT 
+      t.id, t.amount, t.date, t.notes,
+      a.name as account_name,
+      c.name as category_name,
+      p.name as payee_name
+    FROM transactions t
+    LEFT JOIN accounts a ON t.account_id = a.id
+    LEFT JOIN categories c ON t.category_id = c.id
+    LEFT JOIN payees p ON t.payee_id = p.id
+    WHERE t.type = 'EXPENSE' AND t.status = 'UNCLEARED'
+  `);
+
+  for (const tx of pendingTxs) {
+    const isOverdue = tx.date < today;
+    const isDueToday = tx.date === today;
+    const diffTime = new Date(tx.date).getTime() - new Date(today).getTime();
+    const daysDiff = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    items.push({
+      id: `tx_${tx.id}`,
+      rawId: tx.id,
+      source: 'TRANSACTION',
+      title: tx.payee_name || tx.notes || tx.category_name || 'Despesa Pendente',
+      amount: tx.amount,
+      dueDate: tx.date,
+      accountName: tx.account_name || undefined,
+      categoryName: tx.category_name || undefined,
+      isOverdue,
+      isDueToday,
+      daysDiff,
+    });
+  }
+
+  // Ordenar por data de vencimento: mais antigas (mais vencidas) primeiro
+  items.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+
+  return items;
+}
+

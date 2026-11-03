@@ -103,6 +103,10 @@ async function initDatabase(db: SQLite.SQLiteDatabase) {
       FOREIGN KEY (category_id) REFERENCES categories (id) ON DELETE SET NULL,
       FOREIGN KEY (payee_id) REFERENCES payees (id) ON DELETE SET NULL
     );
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
 
   // Migrações dinâmicas para adicionar colunas em bases existentes
@@ -118,22 +122,92 @@ async function initDatabase(db: SQLite.SQLiteDatabase) {
   try {
     await db.execAsync('ALTER TABLE transactions ADD COLUMN is_split INTEGER NOT NULL DEFAULT 0;');
   } catch {}
+  try {
+    await db.execAsync("ALTER TABLE transactions ADD COLUMN expense_type TEXT DEFAULT 'UNICO';");
+  } catch {}
+  try {
+    await db.execAsync('ALTER TABLE transactions ADD COLUMN start_month TEXT;');
+  } catch {}
+  try {
+    await db.execAsync('ALTER TABLE transactions ADD COLUMN end_month TEXT;');
+  } catch {}
+  try {
+    await db.execAsync('ALTER TABLE transactions ADD COLUMN due_day INTEGER;');
+  } catch {}
 
   // Seed default accounts if empty
   const accountCount = await db.getFirstAsync<{ count: number }>('SELECT count(*) as count FROM accounts');
   if (accountCount && accountCount.count === 0) {
     await seedDefaultData(db);
   }
+
+  // Garantir contas e categorias essenciais de CB e Doações
+  await ensureCbAccountsAndCategories(db);
+}
+
+async function ensureCbAccountsAndCategories(db: SQLite.SQLiteDatabase) {
+  // 1. Garantir que as contas CB, Coletas e Outros Valores existam
+  const cb = await db.getFirstAsync<{ id: number }>("SELECT id FROM accounts WHERE UPPER(name) = 'CB'");
+  if (!cb) {
+    await db.runAsync(
+      "INSERT INTO accounts (name, type, initial_balance, current_balance, color, icon) VALUES ('CB', 'CASH', 0, 0, '#0D9488', 'shield-checkmark')"
+    );
+  }
+
+  const coletas = await db.getFirstAsync<{ id: number }>("SELECT id FROM accounts WHERE UPPER(name) = 'COLETAS'");
+  if (!coletas) {
+    await db.runAsync(
+      "INSERT INTO accounts (name, type, initial_balance, current_balance, color, icon) VALUES ('Coletas', 'CASH', 0, 0, '#10B981', 'cash')"
+    );
+  }
+
+  const outros = await db.getFirstAsync<{ id: number }>("SELECT id FROM accounts WHERE UPPER(name) = 'OUTROS VALORES'");
+  if (!outros) {
+    await db.runAsync(
+      "INSERT INTO accounts (name, type, initial_balance, current_balance, color, icon) VALUES ('Outros Valores', 'CASH', 0, 0, '#6366F1', 'gift')"
+    );
+  }
+
+  // 2. Garantir categorias principais para receitas (incluindo onde o dinheiro estará)
+  const targetCategories = [
+    { name: 'Dinheiro(Din)', type: 'INCOME', color: '#10B981', icon: 'cash' },
+    { name: 'C.Itau (CIT)', type: 'INCOME', color: '#F97316', icon: 'business' },
+    { name: 'C.Bradesco(CBr)', type: 'INCOME', color: '#EF4444', icon: 'card' },
+    { name: 'C.PagBank(CPb)', type: 'INCOME', color: '#EAB308', icon: 'wallet' },
+    { name: 'CB', type: 'INCOME', color: '#0D9488', icon: 'shield-checkmark' },
+    { name: 'Coletas', type: 'INCOME', color: '#10B981', icon: 'cash' },
+    { name: 'Outros Valores / Doações', type: 'INCOME', color: '#6366F1', icon: 'gift' },
+    // Categorias de Favorecido para Despesas
+    { name: 'Veículo', type: 'EXPENSE', color: '#EC4899', icon: 'car' },
+    { name: 'Alimentos', type: 'EXPENSE', color: '#F59E0B', icon: 'restaurant' },
+    { name: 'Impostos', type: 'EXPENSE', color: '#64748B', icon: 'receipt' },
+    { name: 'Moradia', type: 'EXPENSE', color: '#3B82F6', icon: 'home' },
+    { name: 'Saúde', type: 'EXPENSE', color: '#EF4444', icon: 'medkit' },
+  ];
+
+  for (const cat of targetCategories) {
+    const existing = await db.getFirstAsync<{ id: number }>(
+      'SELECT id FROM categories WHERE UPPER(name) = ?',
+      [cat.name.toUpperCase()]
+    );
+    if (!existing) {
+      await db.runAsync(
+        'INSERT INTO categories (name, type, color, icon) VALUES (?, ?, ?, ?)',
+        [cat.name, cat.type, cat.color, cat.icon]
+      );
+    }
+  }
 }
 
 async function seedDefaultData(db: SQLite.SQLiteDatabase) {
-  // Contas padrão
+  // Contas padrão com foco em CB e Doações
   await db.runAsync(
     `INSERT INTO accounts (name, type, initial_balance, current_balance, color, icon, closing_day, due_day, credit_limit) VALUES 
-     ('Conta Corrente', 'CHECKING', 0, 0, '#0284C7', 'card-outline', NULL, NULL, NULL),
-     ('Carteira (Dinheiro)', 'CASH', 0, 0, '#059669', 'cash-outline', NULL, NULL, NULL),
-     ('Cartão de Crédito', 'CREDIT_CARD', 0, 0, '#DC2626', 'card', 25, 5, 3000),
-     ('Poupança / Reserva', 'SAVINGS', 0, 0, '#7C3AED', 'wallet-outline', NULL, NULL, NULL)`
+     ('CB', 'CASH', 0, 0, '#0D9488', 'shield-checkmark', NULL, NULL, NULL),
+     ('Coletas', 'CASH', 0, 0, '#10B981', 'cash', NULL, NULL, NULL),
+     ('Outros Valores', 'CASH', 0, 0, '#6366F1', 'gift', NULL, NULL, NULL),
+     ('Conta Bancária', 'CHECKING', 0, 0, '#0284C7', 'card-outline', NULL, NULL, NULL),
+     ('Carteira (Dinheiro)', 'CASH', 0, 0, '#059669', 'cash-outline', NULL, NULL, NULL)`
   );
 
   // Categorias padrão inspiradas no Microsoft Money

@@ -9,14 +9,14 @@ import {
   View as RNView,
   Alert,
 } from 'react-native';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 
 import { Text, View } from '@/components/Themed';
 import Colors from '@/constants/Colors';
 import { useColorScheme } from '@/components/useColorScheme';
 import { Category } from '@/types';
-import { getCategories, createCategory, deleteCategory } from '@/db/categories';
+import { getCategories, createCategory, updateCategory, deleteCategory } from '@/db/categories';
 
 const AVAILABLE_COLORS = [
   '#3B82F6', '#0284C7', '#0D9488', '#10B981', '#059669',
@@ -42,6 +42,7 @@ export default function CategoryManagerScreen() {
   const [modalVisible, setModalVisible] = useState(false);
 
   // Form states
+  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
   const [name, setName] = useState('');
   const [parentId, setParentId] = useState<number | null>(null);
   const [selectedColor, setSelectedColor] = useState(AVAILABLE_COLORS[0]);
@@ -68,21 +69,59 @@ export default function CategoryManagerScreen() {
     setRefreshing(false);
   };
 
-  const handleCreate = async () => {
-    if (!name.trim()) return;
-
-    await createCategory({
-      name: name.trim(),
-      parent_id: parentId,
-      type: activeTab,
-      color: selectedColor,
-      icon: selectedIcon,
-    });
-
+  const handleOpenCreate = (pId: number | null = null) => {
+    setEditingCategory(null);
     setName('');
-    setParentId(null);
-    setModalVisible(false);
-    await loadData();
+    setParentId(pId);
+    setSelectedColor(AVAILABLE_COLORS[0]);
+    setSelectedIcon('folder');
+    setModalVisible(true);
+  };
+
+  const handleOpenEdit = (cat: Category) => {
+    setEditingCategory(cat);
+    setName(cat.name);
+    setParentId(cat.parent_id || null);
+    setSelectedColor(cat.color || AVAILABLE_COLORS[0]);
+    setSelectedIcon((cat.icon as any) || 'folder');
+    setModalVisible(true);
+  };
+
+  const handleSave = async () => {
+    if (!name.trim()) {
+      Alert.alert('Campo Obrigatório', 'Por favor, informe o nome da categoria.');
+      return;
+    }
+
+    try {
+      if (editingCategory) {
+        // Alterar categoria existente
+        await updateCategory(editingCategory.id, {
+          name: name.trim(),
+          color: selectedColor,
+          icon: selectedIcon,
+        });
+        Alert.alert('Sucesso', 'Categoria alterada com sucesso!');
+      } else {
+        // Cadastrar nova categoria
+        await createCategory({
+          name: name.trim(),
+          parent_id: parentId,
+          type: activeTab,
+          color: selectedColor,
+          icon: selectedIcon,
+        });
+        Alert.alert('Sucesso', 'Nova categoria cadastrada com sucesso!');
+      }
+
+      setModalVisible(false);
+      setEditingCategory(null);
+      setName('');
+      await loadData();
+    } catch (e) {
+      console.error('Erro ao salvar categoria:', e);
+      Alert.alert('Erro', 'Não foi possível salvar a categoria.');
+    }
   };
 
   const handleDelete = (cat: Category) => {
@@ -109,7 +148,9 @@ export default function CategoryManagerScreen() {
 
   return (
     <View style={[styles.container, { backgroundColor: theme.background }]}>
-      {/* Abas Despesas vs Receitas */}
+      <Stack.Screen options={{ title: 'Categorias de Favorecido' }} />
+
+      {/* Abas Despesas (Favorecido) vs Receitas */}
       <RNView style={[styles.tabBar, { backgroundColor: theme.card, borderColor: theme.border }]}>
         <TouchableOpacity
           style={[
@@ -124,7 +165,7 @@ export default function CategoryManagerScreen() {
               { color: activeTab === 'EXPENSE' ? theme.expense : theme.subtext },
             ]}
           >
-            Categorias de Despesa
+            Favorecidos / Despesas
           </Text>
         </TouchableOpacity>
 
@@ -141,7 +182,7 @@ export default function CategoryManagerScreen() {
               { color: activeTab === 'INCOME' ? theme.income : theme.subtext },
             ]}
           >
-            Categorias de Receita
+            Receitas
           </Text>
         </TouchableOpacity>
       </RNView>
@@ -152,15 +193,11 @@ export default function CategoryManagerScreen() {
       >
         <RNView style={styles.headerRow}>
           <Text style={[styles.subtitle, { color: theme.subtext }]}>
-            {categories.length} categorias e subcategorias
+            {categories.length} categorias cadastradas
           </Text>
           <TouchableOpacity
             style={[styles.addBtn, { backgroundColor: theme.tint }]}
-            onPress={() => {
-              setName('');
-              setParentId(null);
-              setModalVisible(true);
-            }}
+            onPress={() => handleOpenCreate(null)}
           >
             <Ionicons name="add" size={18} color="#FFF" />
             <Text style={styles.addBtnText}>Nova Categoria</Text>
@@ -168,75 +205,109 @@ export default function CategoryManagerScreen() {
         </RNView>
 
         <View style={[styles.listCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
-          {parentCategories.map((parent, pIndex) => {
-            const subs = getSubcategories(parent.id);
-            return (
-              <RNView
-                key={parent.id}
-                style={[
-                  styles.catGroup,
-                  pIndex > 0 && { borderTopWidth: 1, borderTopColor: theme.border },
-                ]}
-              >
-                {/* Categoria Pai */}
-                <RNView style={styles.parentRow}>
-                  <RNView style={[styles.iconCircle, { backgroundColor: parent.color + '20' }]}>
-                    <Ionicons name={(parent.icon as any) || 'folder'} size={18} color={parent.color} />
+          {parentCategories.length === 0 ? (
+            <RNView style={{ padding: 30, alignItems: 'center' }}>
+              <Ionicons name="folder-open-outline" size={36} color={theme.subtext} />
+              <Text style={{ marginTop: 8, color: theme.subtext, fontSize: 13 }}>
+                Nenhuma categoria cadastrada.
+              </Text>
+            </RNView>
+          ) : (
+            parentCategories.map((parent, pIndex) => {
+              const subs = getSubcategories(parent.id);
+              return (
+                <RNView
+                  key={parent.id}
+                  style={[
+                    styles.catGroup,
+                    pIndex > 0 && { borderTopWidth: 1, borderTopColor: theme.border },
+                  ]}
+                >
+                  {/* Categoria Pai */}
+                  <RNView style={styles.parentRow}>
+                    <RNView style={[styles.iconCircle, { backgroundColor: parent.color + '20' }]}>
+                      <Ionicons name={(parent.icon as any) || 'folder'} size={18} color={parent.color} />
+                    </RNView>
+
+                    <RNView style={styles.catInfo}>
+                      <Text style={styles.parentName}>{parent.name}</Text>
+                      {subs.length > 0 && (
+                        <Text style={[styles.subCount, { color: theme.subtext }]}>
+                          {subs.length} subcategorias
+                        </Text>
+                      )}
+                    </RNView>
+
+                    <RNView style={styles.actionBtns}>
+                      {/* Botão Adicionar Subcategoria */}
+                      <TouchableOpacity
+                        style={styles.iconBtn}
+                        onPress={() => handleOpenCreate(parent.id)}
+                        accessibilityLabel="Adicionar subcategoria"
+                      >
+                        <Ionicons name="add-circle-outline" size={20} color={theme.tint} />
+                      </TouchableOpacity>
+
+                      {/* Botão Editar Categoria */}
+                      <TouchableOpacity
+                        style={styles.iconBtn}
+                        onPress={() => handleOpenEdit(parent)}
+                        accessibilityLabel="Editar categoria"
+                      >
+                        <Ionicons name="pencil" size={17} color={theme.tint} />
+                      </TouchableOpacity>
+
+                      {/* Botão Excluir */}
+                      <TouchableOpacity
+                        style={styles.iconBtn}
+                        onPress={() => handleDelete(parent)}
+                        accessibilityLabel="Excluir categoria"
+                      >
+                        <Ionicons name="trash-outline" size={18} color={theme.expense} />
+                      </TouchableOpacity>
+                    </RNView>
                   </RNView>
 
-                  <RNView style={styles.catInfo}>
-                    <Text style={styles.parentName}>{parent.name}</Text>
-                    {subs.length > 0 && (
-                      <Text style={[styles.subCount, { color: theme.subtext }]}>
-                        {subs.length} subcategorias
-                      </Text>
-                    )}
-                  </RNView>
+                  {/* Subcategorias */}
+                  {subs.map((sub) => (
+                    <RNView key={sub.id} style={styles.subRow}>
+                      <RNView style={styles.subTreeLine}>
+                        <Ionicons name="return-down-forward" size={16} color={theme.subtext} />
+                      </RNView>
 
-                  <RNView style={styles.actionBtns}>
-                    <TouchableOpacity
-                      style={styles.iconBtn}
-                      onPress={() => {
-                        setParentId(parent.id);
-                        setName('');
-                        setSelectedColor(parent.color);
-                        setModalVisible(true);
-                      }}
-                    >
-                      <Ionicons name="add-circle-outline" size={20} color={theme.tint} />
-                    </TouchableOpacity>
+                      <RNView style={[styles.subIcon, { backgroundColor: sub.color + '20' }]}>
+                        <Ionicons name={(sub.icon as any) || 'folder'} size={14} color={sub.color} />
+                      </RNView>
 
-                    <TouchableOpacity style={styles.iconBtn} onPress={() => handleDelete(parent)}>
-                      <Ionicons name="trash-outline" size={18} color={theme.subtext} />
-                    </TouchableOpacity>
-                  </RNView>
+                      <Text style={styles.subName}>{sub.name}</Text>
+
+                      <RNView style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <TouchableOpacity
+                          style={styles.iconBtn}
+                          onPress={() => handleOpenEdit(sub)}
+                          accessibilityLabel="Editar subcategoria"
+                        >
+                          <Ionicons name="pencil" size={15} color={theme.tint} />
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={styles.iconBtn}
+                          onPress={() => handleDelete(sub)}
+                          accessibilityLabel="Excluir subcategoria"
+                        >
+                          <Ionicons name="trash-outline" size={16} color={theme.expense} />
+                        </TouchableOpacity>
+                      </RNView>
+                    </RNView>
+                  ))}
                 </RNView>
-
-                {/* Subcategorias */}
-                {subs.map((sub) => (
-                  <RNView key={sub.id} style={styles.subRow}>
-                    <RNView style={styles.subTreeLine}>
-                      <Ionicons name="return-down-forward" size={16} color={theme.subtext} />
-                    </RNView>
-
-                    <RNView style={[styles.subIcon, { backgroundColor: sub.color + '20' }]}>
-                      <Ionicons name={(sub.icon as any) || 'folder'} size={14} color={sub.color} />
-                    </RNView>
-
-                    <Text style={styles.subName}>{sub.name}</Text>
-
-                    <TouchableOpacity style={styles.iconBtn} onPress={() => handleDelete(sub)}>
-                      <Ionicons name="trash-outline" size={16} color={theme.subtext} />
-                    </TouchableOpacity>
-                  </RNView>
-                ))}
-              </RNView>
-            );
-          })}
+              );
+            })
+          )}
         </View>
       </ScrollView>
 
-      {/* Modal Criar Categoria / Subcategoria */}
+      {/* Modal Criar / Alterar Categoria */}
       <Modal
         visible={modalVisible}
         transparent
@@ -246,16 +317,20 @@ export default function CategoryManagerScreen() {
         <RNView style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: theme.card }]}>
             <Text style={styles.modalTitle}>
-              {parentId ? 'Nova Subcategoria' : 'Nova Categoria'}
+              {editingCategory
+                ? 'Alterar Categoria'
+                : parentId
+                ? 'Nova Subcategoria'
+                : 'Nova Categoria'}
             </Text>
 
-            <Text style={[styles.inputLabel, { color: theme.subtext }]}>Nome</Text>
+            <Text style={[styles.inputLabel, { color: theme.subtext }]}>Nome da Categoria</Text>
             <TextInput
               style={[
                 styles.textInput,
                 { color: theme.text, borderColor: theme.border, backgroundColor: theme.background },
               ]}
-              placeholder="Ex: Farmácia, Aluguel, Salário..."
+              placeholder="Ex: Veículo, Alimentos, Impostos, Farmácia..."
               placeholderTextColor={theme.subtext}
               value={name}
               onChangeText={setName}
@@ -283,41 +358,43 @@ export default function CategoryManagerScreen() {
                 <Text style={[styles.inputLabel, { color: theme.subtext, marginTop: 14 }]}>
                   Ícone
                 </Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.iconsScroll}>
-                  {AVAILABLE_ICONS.map((ic) => (
+                <RNView style={styles.iconsGrid}>
+                  {AVAILABLE_ICONS.slice(0, 16).map((ic) => (
                     <TouchableOpacity
                       key={ic}
                       style={[
-                        styles.iconOption,
+                        styles.iconBox,
                         { borderColor: theme.border },
-                        selectedIcon === ic && { borderColor: theme.tint, backgroundColor: theme.tint + '20' },
+                        selectedIcon === ic && { backgroundColor: theme.tint, borderColor: theme.tint },
                       ]}
                       onPress={() => setSelectedIcon(ic)}
                     >
                       <Ionicons
                         name={ic}
                         size={20}
-                        color={selectedIcon === ic ? theme.tint : theme.text}
+                        color={selectedIcon === ic ? '#FFF' : theme.text}
                       />
                     </TouchableOpacity>
                   ))}
-                </ScrollView>
+                </RNView>
               </>
             )}
 
-            <RNView style={styles.modalActions}>
+            <RNView style={styles.modalBtnsRow}>
               <TouchableOpacity
-                style={[styles.modalBtn, { borderColor: theme.border, borderWidth: 1 }]}
+                style={[styles.modalBtnCancel, { borderColor: theme.border }]}
                 onPress={() => setModalVisible(false)}
               >
-                <Text style={{ color: theme.text, fontWeight: '600' }}>Cancelar</Text>
+                <Text style={[styles.modalBtnTextCancel, { color: theme.text }]}>Cancelar</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.modalBtn, { backgroundColor: theme.tint }]}
-                onPress={handleCreate}
+                style={[styles.modalBtnSave, { backgroundColor: theme.tint }]}
+                onPress={handleSave}
               >
-                <Text style={{ color: '#FFF', fontWeight: '700' }}>Salvar</Text>
+                <Text style={styles.modalBtnTextSave}>
+                  {editingCategory ? 'Salvar Alteração' : 'Criar Categoria'}
+                </Text>
               </TouchableOpacity>
             </RNView>
           </View>
@@ -341,7 +418,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   tabTitle: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '700',
   },
   content: {
@@ -361,34 +438,33 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderRadius: 8,
     gap: 4,
   },
   addBtnText: {
     color: '#FFF',
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
   },
   listCard: {
-    borderRadius: 14,
+    borderRadius: 16,
     borderWidth: 1,
     overflow: 'hidden',
   },
   catGroup: {
-    paddingVertical: 4,
+    padding: 12,
   },
   parentRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 12,
   },
   iconCircle: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    justifyContent: 'center',
     alignItems: 'center',
+    justifyContent: 'center',
     marginRight: 10,
   },
   catInfo: {
@@ -405,99 +481,117 @@ const styles = StyleSheet.create({
   actionBtns: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 6,
   },
   iconBtn: {
-    padding: 4,
+    padding: 6,
   },
   subRow: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 8,
-    paddingHorizontal: 16,
-    paddingLeft: 36,
+    paddingLeft: 24,
+    marginTop: 4,
   },
   subTreeLine: {
     marginRight: 8,
   },
   subIcon: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    justifyContent: 'center',
+    width: 26,
+    height: 26,
+    borderRadius: 13,
     alignItems: 'center',
+    justifyContent: 'center',
     marginRight: 8,
   },
   subName: {
     flex: 1,
     fontSize: 13,
-    fontWeight: '500',
   },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
     justifyContent: 'center',
+    alignItems: 'center',
     padding: 20,
   },
   modalCard: {
+    width: '100%',
     borderRadius: 16,
     padding: 20,
     elevation: 5,
   },
   modalTitle: {
     fontSize: 18,
-    fontWeight: '700',
+    fontWeight: '800',
     marginBottom: 16,
   },
   inputLabel: {
-    fontSize: 13,
-    fontWeight: '600',
+    fontSize: 12,
+    fontWeight: '700',
     marginBottom: 6,
+    textTransform: 'uppercase',
   },
   textInput: {
     borderWidth: 1,
-    borderRadius: 8,
-    padding: 12,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     fontSize: 15,
   },
   colorsScroll: {
     flexDirection: 'row',
-    paddingVertical: 6,
+    marginBottom: 8,
   },
   colorCircle: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     marginRight: 8,
   },
   colorSelected: {
     borderWidth: 3,
     borderColor: '#FFF',
-    elevation: 4,
+    elevation: 3,
   },
-  iconsScroll: {
+  iconsGrid: {
     flexDirection: 'row',
-    paddingVertical: 6,
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 16,
   },
-  iconOption: {
+  iconBox: {
     width: 40,
     height: 40,
-    borderRadius: 8,
+    borderRadius: 10,
     borderWidth: 1,
-    justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 8,
+    justifyContent: 'center',
   },
-  modalActions: {
+  modalBtnsRow: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
     gap: 12,
-    marginTop: 20,
+    marginTop: 10,
   },
-  modalBtn: {
+  modalBtnCancel: {
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 8,
+    borderWidth: 1,
+  },
+  modalBtnTextCancel: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  modalBtnSave: {
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  modalBtnTextSave: {
+    color: '#FFF',
+    fontSize: 14,
+    fontWeight: '700',
   },
 });
-

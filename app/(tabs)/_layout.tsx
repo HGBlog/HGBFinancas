@@ -38,29 +38,46 @@ export default function TabLayout() {
             />
           ),
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="wallet-outline" size={size} color={String(color)} />
+            <Ionicons name="home-outline" size={size} color={String(color)} />
           ),
           headerRight: () => (
-            <Link href="/new-transaction" asChild>
-              <Pressable style={styles.headerButton}>
-                <Ionicons name="add-circle" size={28} color={theme.tint} />
+            <Link href="/settings" asChild>
+              <Pressable style={styles.headerButton} accessibilityLabel="Configurações">
+                <Ionicons name="settings-outline" size={24} color={theme.text} />
               </Pressable>
             </Link>
           ),
         }}
       />
       <Tabs.Screen
-        name="accounts"
+        name="income"
         options={{
-          title: 'Contas',
-          headerTitle: 'Minhas Contas',
+          title: 'Receita',
+          headerTitle: 'Receitas',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="card-outline" size={size} color={String(color)} />
+            <Ionicons name="arrow-down-circle-outline" size={size} color={String(color)} />
           ),
           headerRight: () => (
-            <Link href="/new-transaction" asChild>
+            <Link href={{ pathname: '/new-transaction', params: { initialType: 'INCOME' } }} asChild>
               <Pressable style={styles.headerButton}>
-                <Ionicons name="add-circle" size={28} color={theme.tint} />
+                <Ionicons name="add-circle" size={28} color={theme.income} />
+              </Pressable>
+            </Link>
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="expenses"
+        options={{
+          title: 'Despesas',
+          headerTitle: 'Despesas',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="arrow-up-circle-outline" size={size} color={String(color)} />
+          ),
+          headerRight: () => (
+            <Link href={{ pathname: '/new-transaction', params: { initialType: 'EXPENSE' } }} asChild>
+              <Pressable style={styles.headerButton}>
+                <Ionicons name="add-circle" size={28} color={theme.expense} />
               </Pressable>
             </Link>
           ),
@@ -70,26 +87,28 @@ export default function TabLayout() {
         name="reports"
         options={{
           title: 'Relatórios',
-          headerTitle: 'Relatórios Financeiros',
+          headerTitle: 'Relatórios',
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="pie-chart-outline" size={size} color={String(color)} />
           ),
         }}
       />
       <Tabs.Screen
+        name="accounts"
+        options={{
+          href: null,
+        }}
+      />
+      <Tabs.Screen
         name="planning"
         options={{
-          title: 'Planejamento',
-          headerTitle: 'Orçamento & Contas',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="calendar-outline" size={size} color={String(color)} />
-          ),
+          href: null,
         }}
       />
       <Tabs.Screen
         name="two"
         options={{
-          href: null, // Ocultar tela de exemplo original
+          href: null,
         }}
       />
     </Tabs>

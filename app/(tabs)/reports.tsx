@@ -19,6 +19,7 @@ import {
   getCurrentMonthISO,
   getMonthName,
 } from '@/utils/formatters';
+import { getReportSettings, ReportSettings } from '@/services/settingsService';
 
 export default function ReportsScreen() {
   const colorScheme = useColorScheme();
@@ -34,15 +35,22 @@ export default function ReportsScreen() {
     unclearedTotal: 0,
   });
   const [categoryData, setCategoryData] = useState<CategorySpending[]>([]);
+  const [reportSettings, setReportSettings] = useState<ReportSettings>({
+    includeUncleared: true,
+    sortBy: 'VALUE',
+    savingsTarget: 20,
+  });
 
   const loadData = useCallback(async () => {
     try {
-      const [sum, spending] = await Promise.all([
+      const [sum, spending, rSettings] = await Promise.all([
         getFinancialSummary(currentMonth),
         getCategorySpendingReport(currentMonth),
+        getReportSettings(),
       ]);
       setSummary(sum);
       setCategoryData(spending);
+      setReportSettings(rSettings);
     } catch (e) {
       console.error('Erro ao carregar relatórios:', e);
     }
@@ -116,7 +124,7 @@ export default function ReportsScreen() {
         <RNView style={styles.savingsBox}>
           <RNView style={styles.savingsHeader}>
             <Text style={[styles.savingsLabel, { color: theme.subtext }]}>
-              Taxa de Poupança / Economia
+              Taxa de Poupança / Economia (Meta: {reportSettings.savingsTarget}%)
             </Text>
             <Text
               style={[
@@ -144,7 +152,7 @@ export default function ReportsScreen() {
       {/* Relatório de Despesas por Categoria */}
       <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border, marginTop: 16 }]}>
         <Text style={[styles.cardTitle, { color: theme.subtext, marginBottom: 16 }]}>
-          Despesas por Categoria
+          Despesas por Categoria {reportSettings.sortBy === 'NAME' ? '(Ordem Alfabética)' : '(Por Maior Gasto)'}
         </Text>
 
         {categoryData.length === 0 ? (
@@ -155,7 +163,13 @@ export default function ReportsScreen() {
             </Text>
           </RNView>
         ) : (
-          categoryData.map((item, index) => (
+          [...categoryData]
+            .sort((a, b) =>
+              reportSettings.sortBy === 'NAME'
+                ? a.categoryName.localeCompare(b.categoryName)
+                : b.totalSpent - a.totalSpent
+            )
+            .map((item, index) => (
             <RNView key={item.categoryId} style={[styles.catRow, index > 0 && { marginTop: 16 }]}>
               <RNView style={styles.catHeader}>
                 <RNView style={styles.catLeft}>
