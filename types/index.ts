@@ -24,6 +24,8 @@ export type TransactionType = 'EXPENSE' | 'INCOME' | 'TRANSFER';
 
 export type ExpenseRecurrenceType = 'UNICO' | 'MENSAL' | 'ANUAL' | 'PERSONALIZAR';
 
+export type RecurrenceEditScope = 'CURRENT' | 'ALL' | 'FUTURE';
+
 export type TransactionStatus = 
   | 'CLEARED'    // Compensado (C) / Pago
   | 'RECONCILED' // Conciliado (R)
@@ -56,6 +58,8 @@ export interface Transaction {
   start_month?: string | null;
   end_month?: string | null;
   due_day?: number | null;
+  recurrence_id?: number | null;
+  paid_month?: string | null;
   created_at: string;
   
   // Joined fields for display

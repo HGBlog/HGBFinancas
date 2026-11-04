@@ -60,6 +60,7 @@ async function initDatabase(db: SQLite.SQLiteDatabase) {
       notes TEXT,
       check_number TEXT,
       is_split INTEGER NOT NULL DEFAULT 0,
+      recurrence_id INTEGER,
       created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
       FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE,
       FOREIGN KEY (destination_account_id) REFERENCES accounts (id) ON DELETE SET NULL,
@@ -107,6 +108,16 @@ async function initDatabase(db: SQLite.SQLiteDatabase) {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS expense_monthly_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_id INTEGER NOT NULL,
+      month TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'CLEARED',
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      FOREIGN KEY (transaction_id) REFERENCES transactions (id) ON DELETE CASCADE,
+      UNIQUE(transaction_id, month)
+    );
   `);
 
   // Migrações dinâmicas para adicionar colunas em bases existentes
@@ -133,6 +144,12 @@ async function initDatabase(db: SQLite.SQLiteDatabase) {
   } catch {}
   try {
     await db.execAsync('ALTER TABLE transactions ADD COLUMN due_day INTEGER;');
+  } catch {}
+  try {
+    await db.execAsync('ALTER TABLE transactions ADD COLUMN recurrence_id INTEGER;');
+  } catch {}
+  try {
+    await db.execAsync('ALTER TABLE transactions ADD COLUMN paid_month TEXT;');
   } catch {}
 
   // Seed default accounts if empty

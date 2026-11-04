@@ -15,7 +15,7 @@ import { Ionicons, Feather } from '@expo/vector-icons';
 import { Text, View } from '@/components/Themed';
 import Colors from '@/constants/Colors';
 import { useColorScheme } from '@/components/useColorScheme';
-import { FinancialSummary, Transaction } from '@/types';
+import { FinancialSummary, Transaction, RecurrenceEditScope } from '@/types';
 import { getCbDonationsSummary, CbDonationsSummary, recalculateAllAccountBalances } from '@/db/accounts';
 import {
   getFinancialSummary,
@@ -25,6 +25,7 @@ import {
   updateTransaction,
   createTransaction,
   getAvailableRevenue,
+  updateRecurringExpense,
 } from '@/db/transactions';
 import { getOrCreatePayee } from '@/db/payees';
 import { scheduleExpenseReminderNotifications } from '@/services/notificationService';
@@ -72,6 +73,7 @@ export default function HomeScreen() {
   const [editAmountDigits, setEditAmountDigits] = useState('');
   const [editDateBR, setEditDateBR] = useState('');
   const [calendarPickerVisible, setCalendarPickerVisible] = useState(false);
+  const [editScope, setEditScope] = useState<RecurrenceEditScope>('CURRENT');
 
   const loadData = useCallback(async () => {
     try {
@@ -116,19 +118,13 @@ export default function HomeScreen() {
 
   // Abrir Modal de Edição de Despesa
   const handleOpenEdit = (tx: Transaction) => {
-    if (isPastMonth) {
-      Alert.alert(
-        'Operação Não Permitida',
-        'As despesas de meses passados não podem ser alteradas.'
-      );
-      return;
-    }
     setEditingExpense(tx);
     const currTitle = tx.notes || tx.payee_name || 'Despesa';
     setEditTitle(currTitle);
     const curr = numericToCurrencyInput(tx.amount);
     setEditAmountDigits(curr.rawDigits);
     setEditDateBR(isoToBRDate(tx.date));
+    setEditScope('CURRENT');
   };
 
   // Salvar Edição de Despesa
@@ -156,43 +152,23 @@ export default function HomeScreen() {
     const isRecurring =
       editingExpense.expense_type === 'MENSAL' ||
       editingExpense.expense_type === 'ANUAL' ||
-      editingExpense.expense_type === 'PERSONALIZAR';
+      editingExpense.expense_type === 'PERSONALIZAR' ||
+      (editingExpense.recurrence_id != null && editingExpense.recurrence_id > 0);
 
-    const origMonthISO = editingExpense.date.substring(0, 7);
-    const selectedMonthISO = selectedMonth;
     const dueDay = parseInt(isoDate.split('-')[2], 10) || editingExpense.due_day || 1;
 
     try {
-      const newPayeeId = await getOrCreatePayee(titleTrimmed);
-
-      if (
-        isRecurring &&
-        origMonthISO < selectedMonthISO &&
-        (editingExpense.status === 'CLEARED' || editingExpense.status === 'RECONCILED')
-      ) {
-        // Preserva o lançamento pago do mês anterior intacto:
-        await createTransaction({
-          account_id: editingExpense.account_id,
-          category_id: editingExpense.category_id,
-          payee_id: editingExpense.payee_id,
-          amount: editingExpense.amount,
-          type: 'EXPENSE',
-          date: editingExpense.date,
-          status: editingExpense.status,
-          notes: editingExpense.notes,
-          expense_type: 'UNICO',
-        });
-
-        // Atualiza a despesa recorrente para aplicar no mês atual e nos futuros:
-        await updateTransaction(editingExpense.id, {
-          payee_id: newPayeeId,
-          notes: titleTrimmed,
-          amount: numericValue,
-          date: isoDate,
-          due_day: dueDay,
-          status: 'UNCLEARED',
+      if (isRecurring) {
+        await updateRecurringExpense({
+          tx: editingExpense,
+          currentMonthISO: selectedMonth,
+          newTitle: titleTrimmed,
+          newAmount: numericValue,
+          newDateISO: isoDate,
+          scope: editScope,
         });
       } else {
+        const newPayeeId = await getOrCreatePayee(titleTrimmed);
         await updateTransaction(editingExpense.id, {
           payee_id: newPayeeId,
           notes: titleTrimmed,
@@ -230,7 +206,7 @@ export default function HomeScreen() {
       }
     }
 
-    await toggleTransactionStatus(tx.id);
+    await toggleTransactionStatus(tx, selectedMonth);
     await loadData();
     scheduleExpenseReminderNotifications().catch(() => {});
   };
@@ -260,6 +236,13 @@ export default function HomeScreen() {
       ]
     );
   };
+
+  const isEditingRecurring = editingExpense
+    ? editingExpense.expense_type === 'MENSAL' ||
+      editingExpense.expense_type === 'ANUAL' ||
+      editingExpense.expense_type === 'PERSONALIZAR' ||
+      (editingExpense.recurrence_id != null && editingExpense.recurrence_id > 0)
+    : false;
 
   return (
     <ScrollView
@@ -591,77 +574,190 @@ export default function HomeScreen() {
               </TouchableOpacity>
             </RNView>
 
-            {/* Campo Título */}
-            <Text style={[styles.inputLabel, { color: theme.subtext }]}>Título</Text>
-            <TextInput
-              style={[
-                styles.modalInput,
-                { color: theme.text, borderColor: theme.border, backgroundColor: theme.background },
-              ]}
-              placeholder="Título da despesa..."
-              placeholderTextColor={theme.subtext}
-              value={editTitle}
-              onChangeText={setEditTitle}
-            />
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+              {/* Campo Título */}
+              <Text style={[styles.inputLabel, { color: theme.subtext }]}>Título</Text>
+              <TextInput
+                style={[
+                  styles.modalInput,
+                  { color: theme.text, borderColor: theme.border, backgroundColor: theme.background },
+                ]}
+                placeholder="Título da despesa..."
+                placeholderTextColor={theme.subtext}
+                value={editTitle}
+                onChangeText={setEditTitle}
+              />
 
-            {/* Campo Valor */}
-            <Text style={[styles.inputLabel, { color: theme.subtext, marginTop: 12 }]}>Valor</Text>
-            <TextInput
-              style={[
-                styles.modalInput,
-                { color: theme.text, borderColor: theme.border, backgroundColor: theme.background },
-              ]}
-              keyboardType="numeric"
-              placeholder="R$ 0,00"
-              placeholderTextColor={theme.subtext}
-              value={formatCurrencyInput(editAmountDigits).formatted}
-              onChangeText={(text) => {
-                const digits = text.replace(/\D/g, '');
-                setEditAmountDigits(digits);
-              }}
-            />
+              {/* Campo Valor */}
+              <Text style={[styles.inputLabel, { color: theme.subtext, marginTop: 12 }]}>Valor</Text>
+              <TextInput
+                style={[
+                  styles.modalInput,
+                  { color: theme.text, borderColor: theme.border, backgroundColor: theme.background },
+                ]}
+                keyboardType="numeric"
+                placeholder="R$ 0,00"
+                placeholderTextColor={theme.subtext}
+                value={formatCurrencyInput(editAmountDigits).formatted}
+                onChangeText={(text) => {
+                  const digits = text.replace(/\D/g, '');
+                  setEditAmountDigits(digits);
+                }}
+              />
 
-            {/* Campo Data com máscara e seletor de calendário */}
-            <Text style={[styles.inputLabel, { color: theme.subtext, marginTop: 12 }]}>
-              Data (DD-MM-AAAA)
-            </Text>
-            <TouchableOpacity
-              style={[
-                styles.modalInput,
-                styles.datePickerBtn,
-                { borderColor: theme.border, backgroundColor: theme.background },
-              ]}
-              onPress={() => setCalendarPickerVisible(true)}
-              activeOpacity={0.7}
-            >
-              <Text style={{ color: editDateBR ? theme.text : theme.subtext, fontSize: 15 }}>
-                {editDateBR || 'DD-MM-AAAA'}
+              {/* Campo Data com máscara e seletor de calendário */}
+              <Text style={[styles.inputLabel, { color: theme.subtext, marginTop: 12 }]}>
+                Data (DD-MM-AAAA)
               </Text>
-              <Ionicons name="calendar-outline" size={18} color={theme.tint} />
-            </TouchableOpacity>
-
-            <CalendarPickerModal
-              visible={calendarPickerVisible}
-              initialDateBR={editDateBR}
-              onSelect={(d) => setEditDateBR(d)}
-              onClose={() => setCalendarPickerVisible(false)}
-            />
-
-            <RNView style={styles.modalButtonsRow}>
               <TouchableOpacity
-                style={[styles.modalBtnCancel, { borderColor: theme.border }]}
-                onPress={() => setEditingExpense(null)}
+                style={[
+                  styles.modalInput,
+                  styles.datePickerBtn,
+                  { borderColor: theme.border, backgroundColor: theme.background },
+                ]}
+                onPress={() => setCalendarPickerVisible(true)}
+                activeOpacity={0.7}
               >
-                <Text style={[styles.modalBtnTextCancel, { color: theme.text }]}>Cancelar</Text>
+                <Text style={{ color: editDateBR ? theme.text : theme.subtext, fontSize: 15 }}>
+                  {editDateBR || 'DD-MM-AAAA'}
+                </Text>
+                <Ionicons name="calendar-outline" size={18} color={theme.tint} />
               </TouchableOpacity>
 
-              <TouchableOpacity
-                style={[styles.modalBtnSave, { backgroundColor: theme.tint }]}
-                onPress={handleSaveEdit}
-              >
-                <Text style={styles.modalBtnTextSave}>Salvar Alterações</Text>
-              </TouchableOpacity>
-            </RNView>
+              {/* Opções de Escopo de Recorrência (quando despesa for mensal, anual ou personalizar) */}
+              {isEditingRecurring && (
+                <RNView style={styles.recurrenceScopeSection}>
+                  <Text style={[styles.inputLabel, { color: theme.subtext, marginTop: 14, marginBottom: 8 }]}>
+                    Aplicar alteração:
+                  </Text>
+
+                  {/* 1. Mudar somente essa despesa */}
+                  <TouchableOpacity
+                    style={[
+                      styles.scopeOptionCard,
+                      {
+                        borderColor: editScope === 'CURRENT' ? theme.tint : theme.border,
+                        backgroundColor: editScope === 'CURRENT' ? `${theme.tint}14` : theme.background,
+                      },
+                    ]}
+                    onPress={() => setEditScope('CURRENT')}
+                    activeOpacity={0.7}
+                  >
+                    <RNView style={styles.scopeRadioRow}>
+                      <Ionicons
+                        name={editScope === 'CURRENT' ? 'radio-button-on' : 'radio-button-off'}
+                        size={20}
+                        color={editScope === 'CURRENT' ? theme.tint : theme.subtext}
+                      />
+                      <RNView style={styles.scopeTexts}>
+                        <Text
+                          style={[
+                            styles.scopeTitle,
+                            { color: editScope === 'CURRENT' ? theme.tint : theme.text },
+                          ]}
+                        >
+                          Mudar somente essa despesa
+                        </Text>
+                        <Text style={[styles.scopeSubtitle, { color: theme.subtext }]}>
+                          A alteração será somente da despesa do mês vigente
+                        </Text>
+                      </RNView>
+                    </RNView>
+                  </TouchableOpacity>
+
+                  {/* 2. Mudar todas as despesas */}
+                  <TouchableOpacity
+                    style={[
+                      styles.scopeOptionCard,
+                      {
+                        borderColor: editScope === 'ALL' ? theme.tint : theme.border,
+                        backgroundColor: editScope === 'ALL' ? `${theme.tint}14` : theme.background,
+                      },
+                    ]}
+                    onPress={() => setEditScope('ALL')}
+                    activeOpacity={0.7}
+                  >
+                    <RNView style={styles.scopeRadioRow}>
+                      <Ionicons
+                        name={editScope === 'ALL' ? 'radio-button-on' : 'radio-button-off'}
+                        size={20}
+                        color={editScope === 'ALL' ? theme.tint : theme.subtext}
+                      />
+                      <RNView style={styles.scopeTexts}>
+                        <Text
+                          style={[
+                            styles.scopeTitle,
+                            { color: editScope === 'ALL' ? theme.tint : theme.text },
+                          ]}
+                        >
+                          Mudar todas as despesas (passadas, presente e futuras)
+                        </Text>
+                        <Text style={[styles.scopeSubtitle, { color: theme.subtext }]}>
+                          A alteração será de todas as despesas relacionadas
+                        </Text>
+                      </RNView>
+                    </RNView>
+                  </TouchableOpacity>
+
+                  {/* 3. Mudar somente as despesas do presente e do futuro */}
+                  <TouchableOpacity
+                    style={[
+                      styles.scopeOptionCard,
+                      {
+                        borderColor: editScope === 'FUTURE' ? theme.tint : theme.border,
+                        backgroundColor: editScope === 'FUTURE' ? `${theme.tint}14` : theme.background,
+                      },
+                    ]}
+                    onPress={() => setEditScope('FUTURE')}
+                    activeOpacity={0.7}
+                  >
+                    <RNView style={styles.scopeRadioRow}>
+                      <Ionicons
+                        name={editScope === 'FUTURE' ? 'radio-button-on' : 'radio-button-off'}
+                        size={20}
+                        color={editScope === 'FUTURE' ? theme.tint : theme.subtext}
+                      />
+                      <RNView style={styles.scopeTexts}>
+                        <Text
+                          style={[
+                            styles.scopeTitle,
+                            { color: editScope === 'FUTURE' ? theme.tint : theme.text },
+                          ]}
+                        >
+                          Mudar somente as despesas do presente e do futuro
+                        </Text>
+                        <Text style={[styles.scopeSubtitle, { color: theme.subtext }]}>
+                          A alteração será somente da despesa do mês vigente e dos meses futuros
+                        </Text>
+                      </RNView>
+                    </RNView>
+                  </TouchableOpacity>
+                </RNView>
+              )}
+
+              <CalendarPickerModal
+                visible={calendarPickerVisible}
+                initialDateBR={editDateBR}
+                onSelect={(d) => setEditDateBR(d)}
+                onClose={() => setCalendarPickerVisible(false)}
+              />
+
+              <RNView style={styles.modalButtonsRow}>
+                <TouchableOpacity
+                  style={[styles.modalBtnCancel, { borderColor: theme.border }]}
+                  onPress={() => setEditingExpense(null)}
+                >
+                  <Text style={[styles.modalBtnTextCancel, { color: theme.text }]}>Cancelar</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.modalBtnSave, { backgroundColor: theme.tint }]}
+                  onPress={handleSaveEdit}
+                >
+                  <Text style={styles.modalBtnTextSave}>Salvar Alterações</Text>
+                </TouchableOpacity>
+              </RNView>
+            </ScrollView>
           </RNView>
         </RNView>
       </Modal>
@@ -930,6 +1026,7 @@ const styles = StyleSheet.create({
   },
   modalContent: {
     width: '100%',
+    maxHeight: '90%',
     borderRadius: 16,
     borderWidth: 1,
     padding: 20,
@@ -960,6 +1057,33 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+  },
+  recurrenceScopeSection: {
+    marginTop: 6,
+    marginBottom: 4,
+  },
+  scopeOptionCard: {
+    borderWidth: 1.5,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 10,
+  },
+  scopeRadioRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  scopeTexts: {
+    flex: 1,
+  },
+  scopeTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  scopeSubtitle: {
+    fontSize: 12,
+    lineHeight: 16,
   },
   modalButtonsRow: {
     flexDirection: 'row',

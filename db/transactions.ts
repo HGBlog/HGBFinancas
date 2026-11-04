@@ -1,7 +1,16 @@
 import { getDatabase } from './database';
-import { Transaction, TransactionStatus, TransactionType, FinancialSummary, TransactionSplit, ExpenseRecurrenceType } from '@/types';
+import {
+  Transaction,
+  TransactionStatus,
+  TransactionType,
+  FinancialSummary,
+  TransactionSplit,
+  ExpenseRecurrenceType,
+  RecurrenceEditScope,
+} from '@/types';
 import { recalculateAccountBalance } from './accounts';
-import { MONTH_NAMES_LIST } from '@/utils/formatters';
+import { getOrCreatePayee } from './payees';
+import { MONTH_NAMES_LIST, brDateToISO } from '@/utils/formatters';
 
 export interface TransactionFilter {
   accountId?: number;
@@ -143,6 +152,8 @@ export async function createTransaction(data: {
   start_month?: string | null;
   end_month?: string | null;
   due_day?: number | null;
+  recurrence_id?: number | null;
+  paid_month?: string | null;
   splits?: { category_id: number; amount: number; memo?: string }[];
 }): Promise<number> {
   const db = await getDatabase();
@@ -154,8 +165,8 @@ export async function createTransaction(data: {
     `INSERT INTO transactions (
       account_id, destination_account_id, category_id, payee_id,
       amount, type, date, status, notes, check_number, is_split,
-      expense_type, start_month, end_month, due_day
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      expense_type, start_month, end_month, due_day, recurrence_id, paid_month
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       data.account_id,
       data.destination_account_id || null,
@@ -172,6 +183,8 @@ export async function createTransaction(data: {
       data.start_month || null,
       data.end_month || null,
       data.due_day || null,
+      data.recurrence_id || null,
+      data.paid_month || null,
     ]
   );
 
@@ -226,6 +239,8 @@ export async function updateTransaction(
     'start_month',
     'end_month',
     'due_day',
+    'recurrence_id',
+    'paid_month',
   ] as const;
 
   for (const field of allowedFields) {
@@ -267,17 +282,290 @@ export async function deleteTransaction(id: number): Promise<void> {
 }
 
 // Alternância rápida de status de pagamento (Não Pago / UNCLEARED <-> Pago / CLEARED)
-export async function toggleTransactionStatus(id: number): Promise<TransactionStatus> {
+export async function toggleTransactionStatus(
+  target: number | Transaction,
+  monthISO?: string
+): Promise<TransactionStatus> {
   const db = await getDatabase();
-  const tx = await getTransactionById(id);
+  const tx = typeof target === 'number' ? await getTransactionById(target) : target;
   if (!tx) return 'UNCLEARED';
 
+  const effectiveMonth = monthISO || tx.date.substring(0, 7);
   const isPaid = tx.status === 'CLEARED' || tx.status === 'RECONCILED';
   const nextStatus: TransactionStatus = isPaid ? 'UNCLEARED' : 'CLEARED';
 
-  await db.runAsync('UPDATE transactions SET status = ? WHERE id = ?', [nextStatus, id]);
+  const isRecurring =
+    tx.expense_type === 'MENSAL' ||
+    tx.expense_type === 'ANUAL' ||
+    tx.expense_type === 'PERSONALIZAR';
+
+  if (isRecurring) {
+    const seriesRootId = tx.recurrence_id || tx.id;
+    if (nextStatus === 'CLEARED') {
+      await db.runAsync(
+        `INSERT INTO expense_monthly_payments (transaction_id, month, status)
+         VALUES (?, ?, ?)
+         ON CONFLICT(transaction_id, month) DO UPDATE SET status = excluded.status`,
+        [seriesRootId, effectiveMonth, 'CLEARED']
+      );
+    } else {
+      await db.runAsync(
+        `DELETE FROM expense_monthly_payments WHERE transaction_id = ? AND month = ?`,
+        [seriesRootId, effectiveMonth]
+      );
+    }
+
+    if (tx.account_id) {
+      await recalculateAccountBalance(tx.account_id);
+    }
+    return nextStatus;
+  }
+
+  // Despesa Única (ou receita, ou override avulso)
+  // Guarda paid_month no próprio registro para que despesas acumuladas pagas no mês continuem aparecendo no mês em que foram pagas!
+  const paidMonthVal = nextStatus === 'CLEARED' ? effectiveMonth : null;
+  await db.runAsync(
+    'UPDATE transactions SET status = ?, paid_month = ? WHERE id = ?',
+    [nextStatus, paidMonthVal, tx.id]
+  );
+
   await recalculateAccountBalance(tx.account_id);
+  if (tx.destination_account_id) {
+    await recalculateAccountBalance(tx.destination_account_id);
+  }
   return nextStatus;
+}
+
+function getPreviousMonthISO(monthISO: string): string {
+  const [yearStr, monthStr] = monthISO.split('-');
+  let year = parseInt(yearStr, 10);
+  let month = parseInt(monthStr, 10) - 1;
+  if (month < 1) {
+    month = 12;
+    year -= 1;
+  }
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+export interface UpdateRecurringExpenseParams {
+  tx: Transaction;
+  currentMonthISO: string;
+  newTitle: string;
+  newAmount: number;
+  newDateISO: string;
+  scope: RecurrenceEditScope;
+}
+
+/**
+ * Atualiza uma despesa recorrente ou override aplicando o escopo selecionado:
+ * 1. 'CURRENT': "Mudar somente essa despesa" (somente o mês vigente)
+ * 2. 'ALL': "Mudar todas as despesas (passadas, presente e futuras)"
+ * 3. 'FUTURE': "Mudar somente as despesas do presente e do futuro"
+ */
+export async function updateRecurringExpense({
+  tx,
+  currentMonthISO,
+  newTitle,
+  newAmount,
+  newDateISO,
+  scope,
+}: UpdateRecurringExpenseParams): Promise<void> {
+  const db = await getDatabase();
+  const newPayeeId = await getOrCreatePayee(newTitle);
+  const newDueDay = parseInt(newDateISO.split('-')[2], 10) || tx.due_day || 1;
+  const seriesRootId = tx.recurrence_id || tx.id;
+  const rootTx = (await getTransactionById(seriesRootId)) || tx;
+
+  if (scope === 'CURRENT') {
+    // 1. "Mudar somente essa despesa": altera somente no mês vigente
+    if (tx.expense_type === 'UNICO' && tx.recurrence_id) {
+      await updateTransaction(tx.id, {
+        payee_id: newPayeeId,
+        notes: newTitle,
+        amount: newAmount,
+        date: newDateISO,
+        due_day: newDueDay,
+      });
+      return;
+    }
+
+    // Verificar se já existe um override avulso deste registro para este mês
+    const existingOverride = await db.getFirstAsync<Transaction>(
+      `SELECT * FROM transactions 
+       WHERE recurrence_id = ? AND expense_type = 'UNICO' AND date LIKE ? LIMIT 1`,
+      [seriesRootId, `${currentMonthISO}%`]
+    );
+
+    if (existingOverride) {
+      await updateTransaction(existingOverride.id, {
+        payee_id: newPayeeId,
+        notes: newTitle,
+        amount: newAmount,
+        date: newDateISO,
+        due_day: newDueDay,
+      });
+    } else {
+      await createTransaction({
+        account_id: tx.account_id,
+        category_id: tx.category_id,
+        payee_id: newPayeeId,
+        amount: newAmount,
+        type: 'EXPENSE',
+        date: newDateISO,
+        status: tx.status || 'UNCLEARED',
+        notes: newTitle,
+        expense_type: 'UNICO',
+        recurrence_id: seriesRootId,
+        due_day: newDueDay,
+      });
+    }
+    return;
+  }
+
+  if (scope === 'ALL') {
+    // 2. "Mudar todas as despesas (passadas, presente e futuras)"
+    // REGRA DO USUÁRIO: As alterações NÃO podem ser aplicadas às despesas passadas que foram indicadas como pagas!
+
+    // A) Preserva histórico de meses passados que foram pagos via expense_monthly_payments
+    const pastPaidPayments = await db.getAllAsync<{ month: string }>(
+      `SELECT month FROM expense_monthly_payments 
+       WHERE transaction_id = ? AND month < ? AND status = 'CLEARED'`,
+      [seriesRootId, currentMonthISO]
+    );
+
+    for (const p of pastPaidPayments) {
+      const existing = await db.getFirstAsync<Transaction>(
+        `SELECT id FROM transactions 
+         WHERE recurrence_id = ? AND expense_type = 'UNICO' AND (date LIKE ? OR paid_month = ?)`,
+        [seriesRootId, `${p.month}%`, p.month]
+      );
+      if (!existing) {
+        const oldDueDay = rootTx.due_day || tx.due_day || 1;
+        const dayStr = String(oldDueDay).padStart(2, '0');
+        await createTransaction({
+          account_id: tx.account_id,
+          category_id: tx.category_id,
+          payee_id: rootTx.payee_id || tx.payee_id,
+          amount: rootTx.amount, // Valor original pago intacto!
+          type: 'EXPENSE',
+          date: `${p.month}-${dayStr}`,
+          status: 'CLEARED',
+          notes: rootTx.notes, // Título original intacto!
+          expense_type: 'UNICO',
+          recurrence_id: seriesRootId,
+          due_day: oldDueDay,
+          paid_month: p.month,
+        });
+      }
+    }
+
+    // B) Atualiza os registros vinculados, NUNCA alterando meses passados que foram pagos!
+    const linkedTxs = await db.getAllAsync<Transaction>(
+      `SELECT id, date, status, expense_type FROM transactions WHERE id = ? OR recurrence_id = ?`,
+      [seriesRootId, seriesRootId]
+    );
+
+    for (const item of linkedTxs) {
+      const itemMonth = item.date.substring(0, 7);
+      const isPastPaid =
+        itemMonth < currentMonthISO &&
+        (item.status === 'CLEARED' || item.status === 'RECONCILED');
+
+      if (isPastPaid) {
+        // NÃO ALTERAR: Despesas passadas pagas devem ser preservadas intactas!
+        continue;
+      }
+
+      const [yStr, mStr] = itemMonth.split('-');
+      const daysInMonth = new Date(parseInt(yStr, 10), parseInt(mStr, 10), 0).getDate();
+      const safeDay = Math.min(newDueDay, daysInMonth);
+      const updatedDate = `${yStr}-${mStr}-${String(safeDay).padStart(2, '0')}`;
+
+      await db.runAsync(
+        `UPDATE transactions SET payee_id = ?, notes = ?, amount = ?, due_day = ?, date = ? WHERE id = ?`,
+        [newPayeeId, newTitle, newAmount, newDueDay, updatedDate, item.id]
+      );
+    }
+
+    if (tx.account_id) {
+      await recalculateAccountBalance(tx.account_id);
+    }
+    return;
+  }
+
+  if (scope === 'FUTURE') {
+    // 3. "Mudar somente as despesas do presente e do futuro"
+    const recurrenceStartMonth = rootTx.start_month || rootTx.date.substring(0, 7);
+
+    if (currentMonthISO <= recurrenceStartMonth) {
+      // Estamos no início da série (não há meses passados para esta recorrência)
+      await updateTransaction(rootTx.id, {
+        payee_id: newPayeeId,
+        notes: newTitle,
+        amount: newAmount,
+        date: newDateISO,
+        due_day: newDueDay,
+      });
+
+      // Atualiza overrides futuros ou deste mês se houver
+      await db.runAsync(
+        `UPDATE transactions 
+         SET payee_id = ?, notes = ?, amount = ?, due_day = ? 
+         WHERE recurrence_id = ? AND date >= ?`,
+        [newPayeeId, newTitle, newAmount, newDueDay, seriesRootId, `${currentMonthISO}-01`]
+      );
+    } else {
+      // Há meses passados antes do mês vigente.
+      // Encerra a vigência anterior no mês imediatamente anterior (prevMonthISO):
+      const prevMonth = getPreviousMonthISO(currentMonthISO);
+
+      // Localiza o registro recorrente ativo até o mês vigente
+      const activeRecurrence = await db.getFirstAsync<Transaction>(
+        `SELECT * FROM transactions 
+         WHERE (id = ? OR recurrence_id = ?) 
+           AND expense_type IN ('MENSAL', 'ANUAL', 'PERSONALIZAR')
+           AND (start_month IS NULL OR start_month <= ?)
+           AND (end_month IS NULL OR end_month >= ?)
+         ORDER BY id DESC LIMIT 1`,
+        [seriesRootId, seriesRootId, currentMonthISO, currentMonthISO]
+      );
+
+      const targetToClose = activeRecurrence || rootTx;
+
+      await updateTransaction(targetToClose.id, {
+        end_month: prevMonth,
+      });
+
+      // Cria a nova regra recorrente com início no mês vigente
+      await createTransaction({
+        account_id: tx.account_id,
+        category_id: tx.category_id,
+        payee_id: newPayeeId,
+        amount: newAmount,
+        type: 'EXPENSE',
+        date: newDateISO,
+        status: tx.status || 'UNCLEARED',
+        notes: newTitle,
+        expense_type: rootTx.expense_type || 'MENSAL',
+        start_month: currentMonthISO,
+        end_month: rootTx.expense_type === 'PERSONALIZAR' ? rootTx.end_month : null,
+        due_day: newDueDay,
+        recurrence_id: seriesRootId,
+      });
+
+      // Remove eventuais overrides avulsos do mês atual em diante para a nova regra vigorar
+      await db.runAsync(
+        `DELETE FROM transactions 
+         WHERE recurrence_id = ? AND expense_type = 'UNICO' AND date >= ?`,
+        [seriesRootId, `${currentMonthISO}-01`]
+      );
+    }
+
+    if (tx.account_id) {
+      await recalculateAccountBalance(tx.account_id);
+    }
+    return;
+  }
 }
 
 /**
@@ -292,6 +580,12 @@ export async function getMonthlyExpensesStatement(monthISO: string): Promise<Tra
   const [selectedYearStr, selectedMonthStr] = monthISO.split('-');
   const selectedYear = parseInt(selectedYearStr, 10);
   const selectedMonthNum = parseInt(selectedMonthStr, 10); // 1 to 12
+
+  // Buscar pagamentos mensais para despesas recorrentes deste mês
+  const monthlyPayments = await db.getAllAsync<{ transaction_id: number; status: string }>(
+    `SELECT transaction_id, status FROM expense_monthly_payments WHERE month = ?`,
+    [monthISO]
+  );
 
   // Buscar todas as despesas cadastradas
   const allExpenses = await db.getAllAsync<Transaction>(`
@@ -321,24 +615,66 @@ export async function getMonthlyExpensesStatement(monthISO: string): Promise<Tra
     const expMonthISO = `${expYearStr}-${expMonthStr}`;
 
     const expType = exp.expense_type || 'UNICO';
+    const effectiveStartMonth = exp.start_month || expMonthISO;
+    const effectiveEndMonth = exp.end_month || null;
+
+    // Helper: se este lançamento recorrente possui uma alteração/sobrescrita avulsa (UNICO) para este mês,
+    // a projeção genérica é ignorada para que apenas o lançamento específico apareça.
+    const hasOverrideThisMonth = (): boolean => {
+      const seriesId = exp.recurrence_id || exp.id;
+      return allExpenses.some(
+        (o) =>
+          o.expense_type === 'UNICO' &&
+          (o.recurrence_id === exp.id ||
+            (exp.recurrence_id && o.recurrence_id === exp.recurrence_id) ||
+            o.recurrence_id === seriesId) &&
+          (o.date.substring(0, 7) === monthISO || o.paid_month === monthISO)
+      );
+    };
 
     if (expType === 'MENSAL') {
-      // Aparece todos os meses a partir do mês de cadastro até ser excluída
-      if (monthISO >= expMonthISO) {
-        const itemDate = `${monthISO}-${String(expDay).padStart(2, '0')}`;
-        results.push({
-          ...exp,
-          date: itemDate,
-        });
+      // Aparece todos os meses a partir do mês de início até o mês de término (se houver)
+      const isAfterOrEqualStart = monthISO >= effectiveStartMonth;
+      const isBeforeOrEqualEnd = !effectiveEndMonth || monthISO <= effectiveEndMonth;
+      if (isAfterOrEqualStart && isBeforeOrEqualEnd) {
+        if (!hasOverrideThisMonth()) {
+          const seriesId = exp.recurrence_id || exp.id;
+          const paymentRecord = monthlyPayments.find(
+            (p) => p.transaction_id === exp.id || p.transaction_id === seriesId
+          );
+          const effectiveStatus = paymentRecord
+            ? (paymentRecord.status as TransactionStatus)
+            : 'UNCLEARED';
+
+          const itemDate = `${monthISO}-${String(expDay).padStart(2, '0')}`;
+          results.push({
+            ...exp,
+            date: itemDate,
+            status: effectiveStatus,
+          });
+        }
       }
     } else if (expType === 'ANUAL') {
-      // Aparece no mesmo mês e dia todo ano a partir do cadastro
-      if (selectedMonthNum === expMonthNum && selectedYear >= expYear) {
-        const itemDate = `${monthISO}-${String(expDay).padStart(2, '0')}`;
-        results.push({
-          ...exp,
-          date: itemDate,
-        });
+      // Aparece no mesmo mês e dia todo ano a partir do cadastro dentro da vigência
+      const isAfterOrEqualStart = monthISO >= effectiveStartMonth;
+      const isBeforeOrEqualEnd = !effectiveEndMonth || monthISO <= effectiveEndMonth;
+      if (selectedMonthNum === expMonthNum && isAfterOrEqualStart && isBeforeOrEqualEnd) {
+        if (!hasOverrideThisMonth()) {
+          const seriesId = exp.recurrence_id || exp.id;
+          const paymentRecord = monthlyPayments.find(
+            (p) => p.transaction_id === exp.id || p.transaction_id === seriesId
+          );
+          const effectiveStatus = paymentRecord
+            ? (paymentRecord.status as TransactionStatus)
+            : 'UNCLEARED';
+
+          const itemDate = `${monthISO}-${String(expDay).padStart(2, '0')}`;
+          results.push({
+            ...exp,
+            date: itemDate,
+            status: effectiveStatus,
+          });
+        }
       }
     } else if (expType === 'PERSONALIZAR') {
       // Início e Término (suporta YYYY-MM, Mês/AAAA ou nome legado do mês)
@@ -356,12 +692,14 @@ export async function getMonthlyExpensesStatement(monthISO: string): Promise<Tra
         return null;
       };
 
-      const startISO = parseMonthISO(exp.start_month);
-      const endISO = parseMonthISO(exp.end_month);
+      const startISO = parseMonthISO(exp.start_month) || effectiveStartMonth;
+      const endISO = parseMonthISO(exp.end_month) || effectiveEndMonth;
 
       let inRange = false;
       if (startISO && endISO) {
         inRange = monthISO >= startISO && monthISO <= endISO;
+      } else if (startISO) {
+        inRange = monthISO >= startISO;
       } else {
         // Fallback para compatibilidade com nomes de meses simples
         const startIdx = exp.start_month ? (MONTH_NAMES_LIST as readonly string[]).indexOf(exp.start_month) + 1 : 1;
@@ -379,22 +717,43 @@ export async function getMonthlyExpensesStatement(monthISO: string): Promise<Tra
       }
 
       if (inRange) {
-        const itemDate = `${monthISO}-${String(expDay).padStart(2, '0')}`;
-        results.push({
-          ...exp,
-          date: itemDate,
-        });
+        if (!hasOverrideThisMonth()) {
+          const seriesId = exp.recurrence_id || exp.id;
+          const paymentRecord = monthlyPayments.find(
+            (p) => p.transaction_id === exp.id || p.transaction_id === seriesId
+          );
+          const effectiveStatus = paymentRecord
+            ? (paymentRecord.status as TransactionStatus)
+            : 'UNCLEARED';
+
+          const itemDate = `${monthISO}-${String(expDay).padStart(2, '0')}`;
+          results.push({
+            ...exp,
+            date: itemDate,
+            status: effectiveStatus,
+          });
+        }
       }
     } else {
       // ÚNICO
       if (expMonthISO === monthISO) {
         // Despesa do próprio mês
         results.push(exp);
+      } else if (exp.paid_month === monthISO) {
+        // Despesa acumulada de outro mês que FOI PAGA NESTE MÊS! Permanece visível na fatura deste mês como PAGA!
+        results.push({
+          ...exp,
+          notes: exp.notes
+            ? (exp.notes.includes('[Acumulada') ? exp.notes : `[Acumulada de ${expMonthStr}/${expYearStr}] ${exp.notes}`)
+            : `[Acumulada de ${expMonthStr}/${expYearStr}]`,
+        });
       } else if (expMonthISO < monthISO && exp.status !== 'CLEARED' && exp.status !== 'RECONCILED') {
         // Despesa de mês anterior NÃO PAGA: acumula e continua aparecendo até o pagamento!
         results.push({
           ...exp,
-          notes: exp.notes ? `[Acumulada de ${expMonthStr}/${expYearStr}] ${exp.notes}` : `[Acumulada de ${expMonthStr}/${expYearStr}]`,
+          notes: exp.notes
+            ? (exp.notes.includes('[Acumulada') ? exp.notes : `[Acumulada de ${expMonthStr}/${expYearStr}] ${exp.notes}`)
+            : `[Acumulada de ${expMonthStr}/${expYearStr}]`,
         });
       }
     }
@@ -423,11 +782,19 @@ export async function getAvailableRevenue(monthPrefix: string): Promise<number> 
   );
   const paidExpenseUpToMonth = await db.getFirstAsync<{ sum: number | null }>(
     `SELECT SUM(amount) as sum FROM transactions 
-     WHERE type = 'EXPENSE' AND (status = 'CLEARED' OR status = 'RECONCILED') AND date <= ?`,
-    [lastDateOfMonth]
+     WHERE type = 'EXPENSE' AND (status = 'CLEARED' OR status = 'RECONCILED') AND (date <= ? OR paid_month <= ?)`,
+    [lastDateOfMonth, monthPrefix]
   );
+  const paidRecurringUpToMonth = await db.getFirstAsync<{ sum: number | null }>(
+    `SELECT SUM(t.amount) as sum 
+     FROM expense_monthly_payments p 
+     JOIN transactions t ON p.transaction_id = t.id 
+     WHERE p.status = 'CLEARED' AND p.month <= ?`,
+    [monthPrefix]
+  );
+
   const inSum = incomeUpToMonth?.sum ?? 0;
-  const paidOutSum = paidExpenseUpToMonth?.sum ?? 0;
+  const paidOutSum = (paidExpenseUpToMonth?.sum ?? 0) + (paidRecurringUpToMonth?.sum ?? 0);
   return Math.max(0, inSum - paidOutSum);
 }
 
@@ -448,12 +815,19 @@ export async function getFinancialSummary(monthPrefix: string): Promise<Financia
   // Despesas pagas acumuladas até o final do mês selecionado
   const paidExpenseUpToMonth = await db.getFirstAsync<{ sum: number | null }>(
     `SELECT SUM(amount) as sum FROM transactions 
-     WHERE type = 'EXPENSE' AND (status = 'CLEARED' OR status = 'RECONCILED') AND date <= ?`,
-    [lastDateOfMonth]
+     WHERE type = 'EXPENSE' AND (status = 'CLEARED' OR status = 'RECONCILED') AND (date <= ? OR paid_month <= ?)`,
+    [lastDateOfMonth, monthPrefix]
+  );
+  const paidRecurringUpToMonth = await db.getFirstAsync<{ sum: number | null }>(
+    `SELECT SUM(t.amount) as sum 
+     FROM expense_monthly_payments p 
+     JOIN transactions t ON p.transaction_id = t.id 
+     WHERE p.status = 'CLEARED' AND p.month <= ?`,
+    [monthPrefix]
   );
 
   const inSum = incomeUpToMonth?.sum ?? 0;
-  const paidOutSum = paidExpenseUpToMonth?.sum ?? 0;
+  const paidOutSum = (paidExpenseUpToMonth?.sum ?? 0) + (paidRecurringUpToMonth?.sum ?? 0);
 
   // Valor total em mãos: somente valores de receita que não foram usados para pagar contas (se todos usados, R$ 0,00)
   const totalBalance = Math.max(0, inSum - paidOutSum);
